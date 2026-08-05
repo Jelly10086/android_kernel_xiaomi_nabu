@@ -50,7 +50,7 @@ jobs:
           set -euxo pipefail
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            bc bison build-essential ca-certificates cpio curl flex git \
+            bc bison build-essential ca-certificates ccache cpio curl flex git \
             libelf-dev libssl-dev python3 rsync unzip zip zlib1g-dev
 
       - name: Fetch pinned toolchains
@@ -104,6 +104,26 @@ jobs:
             echo "PAHOLE=$pahole"
           } >> "$GITHUB_ENV"
 
+      - name: Restore compiler cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: nabu-ccache-${{ runner.os }}-${{ env.CLANG_COMMIT }}-${{ hashFiles('arch/arm64/configs/nabu_defconfig', 'bk_build/configs/nabu-a16.config', 'Makefile') }}-${{ github.sha }}
+          restore-keys: |
+            nabu-ccache-${{ runner.os }}-${{ env.CLANG_COMMIT }}-${{ hashFiles('arch/arm64/configs/nabu_defconfig', 'bk_build/configs/nabu-a16.config', 'Makefile') }}-
+            nabu-ccache-${{ runner.os }}-${{ env.CLANG_COMMIT }}-
+
+      - name: Configure compiler cache
+        shell: bash
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/ccache
+        run: |
+          set -euxo pipefail
+          mkdir -p "$CCACHE_DIR"
+          ccache --max-size=4G
+          ccache --set-config=compression=true
+          ccache --zero-stats
+
       - name: Build and validate package
         shell: bash
         env:
@@ -111,10 +131,19 @@ jobs:
           OUT_DIR: ${{ github.workspace }}/out/ci
           JOBS: "4"
           DISABLE_LTO_CACHE: "1"
+          CCACHE: ccache
+          CCACHE_DIR: ${{ runner.temp }}/ccache
         run: |
           set -euxo pipefail
           ./bk_build/build.sh
           df -h /
+
+      - name: Show compiler cache statistics
+        if: always()
+        shell: bash
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/ccache
+        run: ccache --show-stats
 
       - name: Locate package
         id: package

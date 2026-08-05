@@ -17,6 +17,7 @@ GCC32_DIR=${GCC32_DIR:-/home/rinnrei/Project/uwuAOSP/prebuilts/gcc/linux-x86/arm
 PAHOLE=${PAHOLE:-/home/rinnrei/Project/uwuAOSP/prebuilts/kernel-build-tools/linux-x86/bin/pahole}
 PAHOLE_FLAGS=${PAHOLE_FLAGS:-"--skip_encoding_btf_decl_tag --skip_encoding_btf_type_tag --skip_encoding_btf_enum64"}
 DISABLE_LTO_CACHE=${DISABLE_LTO_CACHE:-0}
+CCACHE=${CCACHE:-}
 CROSS_COMPILE=${CROSS_COMPILE:-aarch64-linux-androidkernel-}
 CROSS_COMPILE_ARM32=${CROSS_COMPILE_ARM32:-arm-linux-androideabi-}
 CLANG_TRIPLE=${CLANG_TRIPLE:-aarch64-linux-gnu-}
@@ -40,6 +41,13 @@ done
 "$CLANG_DIR/bin/clang" --version | head -1 | grep -F 'r547379' >/dev/null || {
   echo "AOSP Clang r547379 is required" >&2; exit 2;
 }
+CC="$CLANG_DIR/bin/clang"
+if [ -n "$CCACHE" ]; then
+  command -v "$CCACHE" >/dev/null 2>&1 || {
+    echo "ccache not found: $CCACHE" >&2; exit 2;
+  }
+  CC="$CCACHE $CC"
+fi
 [ -d "$GCC64_DIR/bin" ] || { echo "64-bit GNU binutils not found: $GCC64_DIR/bin" >&2; exit 2; }
 [ -d "$GCC32_DIR/bin" ] || { echo "32-bit GNU binutils not found: $GCC32_DIR/bin" >&2; exit 2; }
 PATH="$CLANG_DIR/bin:$GCC64_DIR/bin:$GCC32_DIR/bin:$PATH"
@@ -49,7 +57,7 @@ make_kernel()
 {
   make -C "$KERNEL_DIR" \
     ARCH="$ARCH" O="$OUT_DIR" \
-    CC="$CLANG_DIR/bin/clang" LD="$CLANG_DIR/bin/ld.lld" \
+    CC="$CC" LD="$CLANG_DIR/bin/ld.lld" \
     AR="$CLANG_DIR/bin/llvm-ar" NM="$CLANG_DIR/bin/llvm-nm" \
     OBJCOPY="$CLANG_DIR/bin/llvm-objcopy" \
     OBJDUMP="$CLANG_DIR/bin/llvm-objdump" \
@@ -70,6 +78,7 @@ stage "配置" "内核目录：$KERNEL_DIR"
 printf '输出目录：%s\n配置文件：%s\n并行任务：%s\n' \
   "$OUT_DIR" "$DEFCONFIG" "$JOBS"
 printf 'ThinLTO 磁盘缓存：%s\n' "$([ "$DISABLE_LTO_CACHE" = 1 ] && echo 关闭 || echo 开启)"
+printf 'ccache：%s\n' "$([ -n "$CCACHE" ] && echo 开启 || echo 关闭)"
 
 # The nabu defconfig is the only default entry point.  The fragment is merged
 # after defconfig and normalized by olddefconfig so dependencies are resolved.
@@ -215,6 +224,12 @@ git -C "$KERNEL_DIR" ls-files --others --exclude-standard > \
   echo "ANYKERNEL_TEMPLATE_SHA256=$anykernel_template_sha"
   echo "CLANG=$CLANG_DIR/bin/clang"
   "$CLANG_DIR/bin/clang" --version | head -1
+  if [ -n "$CCACHE" ]; then
+    echo "CCACHE=$(command -v "$CCACHE")"
+    "$CCACHE" --version | head -1
+  else
+    echo "CCACHE=disabled"
+  fi
   echo "PAHOLE=$PAHOLE"
   "$PAHOLE" --version
   echo "UNTRACKED_SOURCE_LIST=untracked-sources.txt"

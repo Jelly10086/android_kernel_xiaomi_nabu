@@ -1,4 +1,4 @@
-#! /usr/bin/env python
+#!/usr/bin/env python3
 # Copyright 2017, The Android Open Source Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -124,7 +124,7 @@ class DtEntry(object):
                 version: Version of DTBO header, compression is only
                          supported from version 1.
         """
-        if version is 0:
+        if version == 0:
             return CompressionFormat.NO_COMPRESSION
         return self.flags & self._COMPRESSION_FORMAT_MASK
 
@@ -244,7 +244,7 @@ class Dtbo(object):
         Tree table entries and update the DTBO header.
         """
 
-        self.__metadata = array('c', ' ' * self.__metadata_size)
+        self.__metadata = array('b', b' ' * self.__metadata_size)
         metadata_offset = self.header_size
         for dt_entry in self.__dt_entries:
             self._update_dt_entry_header(dt_entry, metadata_offset)
@@ -290,7 +290,7 @@ class Dtbo(object):
         if self.__dt_entries:
             raise ValueError('DTBO DT entries can be added only once')
 
-        offset = self.dt_entries_offset / 4
+        offset = self.dt_entries_offset // 4
         params = {}
         params['dt_file'] = None
         for i in range(0, self.dt_entry_count):
@@ -324,7 +324,7 @@ class Dtbo(object):
         num_ints = (self._DT_TABLE_HEADER_INTS +
                     self.dt_entry_count * self._DT_ENTRY_HEADER_INTS)
         if self.dt_entries_offset > self._DT_TABLE_HEADER_SIZE:
-            num_ints += (self.dt_entries_offset - self._DT_TABLE_HEADER_SIZE) / 4
+            num_ints += (self.dt_entries_offset - self._DT_TABLE_HEADER_SIZE) // 4
         format_str = '>' + str(num_ints) + 'I'
         self.__file.seek(0)
         self.__metadata = struct.unpack(format_str,
@@ -430,7 +430,7 @@ class Dtbo(object):
         if compression_format not in compression_obj_dict:
             ValueError("Bad compression format %d" % compression_format)
 
-        if compression_format is CompressionFormat.NO_COMPRESSION:
+        if compression_format == CompressionFormat.NO_COMPRESSION:
             dt_entry = dt_entry_file.read()
         else:
             compression_object = compression_obj_dict[compression_format]
@@ -465,7 +465,7 @@ class Dtbo(object):
         dt_offset = (self.header_size +
                      dt_entry_count * self.dt_entry_size)
 
-        dt_entry_buf = ""
+        dt_entry_buf = b""
         for dt_entry in dt_entries:
             if not isinstance(dt_entry, DtEntry):
                 raise ValueError('Adding invalid DT entry object to DTBO')
@@ -612,7 +612,7 @@ def parse_dt_entries(global_args, arg_list):
         raise ValueError('Input DT images must be provided')
 
     total_images = len(img_file_idx)
-    for idx in xrange(total_images):
+    for idx in range(total_images):
         start_idx = img_file_idx[idx]
         if idx == total_images - 1:
             argv = arg_list[start_idx:]
@@ -769,7 +769,7 @@ def parse_dump_cmd_args(arglist):
 
     parser = argparse.ArgumentParser(prog='dump')
     parser.add_argument('--output', '-o', nargs='?',
-                        type=argparse.FileType('wb'),
+                        type=argparse.FileType('w'),
                         dest='outfile',
                         default=stdout)
     parser.add_argument('--dtb', '-b', nargs='?', type=str,
@@ -789,7 +789,7 @@ def parse_config_create_cmd_args(arglist):
     """
     parser = argparse.ArgumentParser(prog='cfg_create')
     parser.add_argument('conf_file', nargs='?',
-                        type=argparse.FileType('rb'),
+                        type=argparse.FileType('r'),
                         default=None)
     cwd = os.getcwd()
     parser.add_argument('--dtb-dir', '-d', nargs='?', type=str,

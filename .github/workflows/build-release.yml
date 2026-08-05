@@ -1,0 +1,176 @@
+name: Build and release nabu kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag; leave empty to generate a UTC tag"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nabu-kernel-release
+  cancel-in-progress: false
+
+env:
+  CLANG_COMMIT: 77c95e8253c2c82ffd4fee92c0ad9f5ac1e8ca04
+  GCC64_COMMIT: 5e030eafe024784a73cdf47e6936ac0dbfc763dc
+  GCC32_COMMIT: 111258a10e017f067b27e6cfcea7619d753f3309
+  BUILD_TOOLS_COMMIT: 811c6e2938d53b3c318d7635b03931601a68c765
+
+jobs:
+  build-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout kernel
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          for path in /usr/local/lib/android /opt/ghc /usr/share/dotnet /opt/hostedtoolcache; do
+            if [[ -d "$path" ]]; then
+              sudo find "$path" -xdev -depth -delete
+            fi
+          done
+          docker system prune --all --force || true
+          df -h /
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            bc bison build-essential ca-certificates cpio curl flex git \
+            libelf-dev libssl-dev python3 rsync unzip zip zlib1g-dev
+
+      - name: Fetch pinned toolchains
+        shell: bash
+        run: |
+          set -euxo pipefail
+          toolchain_root="${RUNNER_TEMP}/nabu-toolchains"
+          clang_repo="${toolchain_root}/clang-prebuilts"
+          gcc64_dir="${toolchain_root}/gcc64"
+          gcc32_dir="${toolchain_root}/gcc32"
+          build_tools_dir="${toolchain_root}/kernel-build-tools"
+          mkdir -p "$toolchain_root"
+
+          git init "$clang_repo"
+          git -C "$clang_repo" remote add origin \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86
+          git -C "$clang_repo" sparse-checkout init --cone
+          git -C "$clang_repo" sparse-checkout set clang-r547379
+          git -C "$clang_repo" fetch --depth=1 --filter=blob:none origin "$CLANG_COMMIT"
+          git -C "$clang_repo" checkout --detach FETCH_HEAD
+
+          git init "$gcc64_dir"
+          git -C "$gcc64_dir" remote add origin \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9
+          git -C "$gcc64_dir" fetch --depth=1 origin "$GCC64_COMMIT"
+          git -C "$gcc64_dir" checkout --detach FETCH_HEAD
+
+          git init "$gcc32_dir"
+          git -C "$gcc32_dir" remote add origin \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9
+          git -C "$gcc32_dir" fetch --depth=1 origin "$GCC32_COMMIT"
+          git -C "$gcc32_dir" checkout --detach FETCH_HEAD
+
+          git init "$build_tools_dir"
+          git -C "$build_tools_dir" remote add origin \
+            https://android.googlesource.com/kernel/prebuilts/build-tools
+          git -C "$build_tools_dir" sparse-checkout init --cone
+          git -C "$build_tools_dir" sparse-checkout set linux-x86
+          git -C "$build_tools_dir" fetch --depth=1 --filter=blob:none origin "$BUILD_TOOLS_COMMIT"
+          git -C "$build_tools_dir" checkout --detach FETCH_HEAD
+
+          clang_dir="${clang_repo}/clang-r547379"
+          pahole="${build_tools_dir}/linux-x86/bin/pahole"
+          "$clang_dir/bin/clang" --version | head -n 1 | grep -F r547379
+          test "$("$pahole" --version)" = v1.25
+
+          {
+            echo "CLANG_DIR=$clang_dir"
+            echo "GCC64_DIR=$gcc64_dir"
+            echo "GCC32_DIR=$gcc32_dir"
+            echo "PAHOLE=$pahole"
+          } >> "$GITHUB_ENV"
+
+      - name: Build and validate package
+        shell: bash
+        env:
+          KERNEL_DIR: ${{ github.workspace }}
+          OUT_DIR: ${{ github.workspace }}/out/ci
+          JOBS: "4"
+          DISABLE_LTO_CACHE: "1"
+        run: |
+          set -euxo pipefail
+          ./bk_build/build.sh
+          df -h /
+
+      - name: Locate package
+        id: package
+        shell: bash
+        env:
+          OUT_DIR: ${{ github.workspace }}/out/ci
+        run: |
+          set -euo pipefail
+          package=$(find "$OUT_DIR/packages" -maxdepth 1 -type f \
+            -name 'bk-Kernel_nabu-A16-Hyper-*.zip' -print -quit)
+          test -n "$package"
+          test -f "$package.sha256"
+          unzip -t "$package" >/dev/null
+          package_dir=$(dirname "$package")
+          package_name=$(basename "$package")
+          (cd "$package_dir" && sha256sum --check "${package_name}.sha256")
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+          echo "checksum=$package.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: bk-Kernel_nabu-A16-Hyper
+          path: |
+            ${{ steps.package.outputs.package }}
+            ${{ steps.package.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+          PACKAGE: ${{ steps.package.outputs.package }}
+          CHECKSUM: ${{ steps.package.outputs.checksum }}
+        run: |
+          set -euo pipefail
+          tag="$REQUESTED_TAG"
+          if [[ -z "$tag" ]]; then
+            tag="bk-nabu-$(date -u +%Y%m%d-%H%M%S)"
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release already exists: $tag" >&2
+            exit 1
+          fi
+          notes="${RUNNER_TEMP}/release-notes.md"
+          {
+            echo "Kernel: 4.14.190-bk-Kernel_nabu-RT-A16-Hyper"
+            echo "Target: Xiaomi Pad 5 (nabu)"
+            echo "Build: GitHub Actions run ${GITHUB_RUN_NUMBER}"
+            echo "Commit: ${GITHUB_SHA}"
+          } > "$notes"
+          gh release create "$tag" "$PACKAGE" "$CHECKSUM" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "bk Kernel nabu A16 Hyper ${tag}" \
+            --notes-file "$notes" \
+            --latest

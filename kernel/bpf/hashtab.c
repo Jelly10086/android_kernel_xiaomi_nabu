@@ -50,6 +50,7 @@ struct htab_elem {
 			union {
 				struct bpf_htab *htab;
 				struct pcpu_freelist_node fnode;
+				struct htab_elem *batch_flink;
 			};
 		};
 	};
@@ -692,21 +693,12 @@ static bool fd_htab_map_needs_adjust(const struct bpf_htab *htab)
 	       BITS_PER_LONG == 64;
 }
 
-static u32 htab_size_value(const struct bpf_htab *htab, bool percpu)
-{
-	u32 size = htab->map.value_size;
-
-	if (percpu || fd_htab_map_needs_adjust(htab))
-		size = round_up(size, 8);
-	return size;
-}
-
 static struct htab_elem *alloc_htab_elem(struct bpf_htab *htab, void *key,
 					 void *value, u32 key_size, u32 hash,
 					 bool percpu, bool onallcpus,
 					 struct htab_elem *old_elem)
 {
-	u32 size = htab_size_value(htab, percpu);
+	u32 size = htab->map.value_size;
 	bool prealloc = htab_is_prealloc(htab);
 	struct htab_elem *l_new, **pl_new;
 	void __percpu *pptr;
@@ -744,10 +736,13 @@ static struct htab_elem *alloc_htab_elem(struct bpf_htab *htab, void *key,
 			l_new = ERR_PTR(-ENOMEM);
 			goto dec_count;
 		}
+		check_and_init_map_lock(&htab->map,
+					l_new->key + round_up(key_size, 8));
 	}
 
 	memcpy(l_new->key, key, key_size);
 	if (percpu) {
+		size = round_up(size, 8);
 		if (prealloc) {
 			pptr = htab_elem_get_ptr(l_new, key_size);
 		} else {
@@ -765,8 +760,12 @@ static struct htab_elem *alloc_htab_elem(struct bpf_htab *htab, void *key,
 
 		if (!prealloc)
 			htab_elem_set_ptr(l_new, key_size, pptr);
-	} else {
+	} else if (fd_htab_map_needs_adjust(htab)) {
+		size = round_up(size, 8);
 		memcpy(l_new->key + round_up(key_size, 8), value, size);
+	} else {
+		copy_map_value(&htab->map,
+			       l_new->key + round_up(key_size, 8), value);
 	}
 
 	l_new->hash = hash;
@@ -779,11 +778,11 @@ dec_count:
 static int check_flags(struct bpf_htab *htab, struct htab_elem *l_old,
 		       u64 map_flags)
 {
-	if (l_old && map_flags == BPF_NOEXIST)
+	if (l_old && (map_flags & ~BPF_F_LOCK) == BPF_NOEXIST)
 		/* elem already exists */
 		return -EEXIST;
 
-	if (!l_old && map_flags == BPF_EXIST)
+	if (!l_old && (map_flags & ~BPF_F_LOCK) == BPF_EXIST)
 		/* elem doesn't exist, cannot update it */
 		return -ENOENT;
 
@@ -802,7 +801,7 @@ static int htab_map_update_elem(struct bpf_map *map, void *key, void *value,
 	u32 key_size, hash;
 	int ret;
 
-	if (unlikely(map_flags > BPF_EXIST))
+	if (unlikely((map_flags & ~BPF_F_LOCK) > BPF_EXIST))
 		/* unknown flags */
 		return -EINVAL;
 
@@ -815,6 +814,22 @@ static int htab_map_update_elem(struct bpf_map *map, void *key, void *value,
 	b = __select_bucket(htab, hash);
 	head = &b->head;
 
+	if (unlikely(map_flags & BPF_F_LOCK)) {
+		if (unlikely(!map_value_has_spin_lock(map)))
+			return -EINVAL;
+		l_old = lookup_nulls_elem_raw(head, hash, key, key_size,
+					      htab->n_buckets);
+		ret = check_flags(htab, l_old, map_flags);
+		if (ret)
+			return ret;
+		if (l_old) {
+			copy_map_value_locked(map,
+					      l_old->key + round_up(key_size, 8),
+					      value, false);
+			return 0;
+		}
+	}
+
 	/* bpf_map_update_elem() can be called in_irq() */
 	raw_spin_lock_irqsave(&b->lock, flags);
 
@@ -823,6 +838,13 @@ static int htab_map_update_elem(struct bpf_map *map, void *key, void *value,
 	ret = check_flags(htab, l_old, map_flags);
 	if (ret)
 		goto err;
+	if (unlikely(l_old && (map_flags & BPF_F_LOCK))) {
+		copy_map_value_locked(map,
+				      l_old->key + round_up(key_size, 8),
+				      value, false);
+		ret = 0;
+		goto err;
+	}
 
 	l_new = alloc_htab_elem(htab, key, value, key_size, hash, false, false,
 				l_old);
@@ -1150,10 +1172,217 @@ static void htab_map_free(struct bpf_map *map)
 	kfree(htab);
 }
 
+static int __htab_map_lookup_and_delete_batch(struct bpf_map *map,
+					       const union bpf_attr *attr,
+					       union bpf_attr __user *uattr,
+					       bool do_delete, bool is_lru,
+					       bool is_percpu)
+{
+	struct bpf_htab *htab = container_of(map, struct bpf_htab, map);
+	void __user *uvalues = u64_to_user_ptr(attr->batch.values);
+	void __user *ukeys = u64_to_user_ptr(attr->batch.keys);
+	void __user *ubatch = u64_to_user_ptr(attr->batch.in_batch);
+	void __user *uobatch = u64_to_user_ptr(attr->batch.out_batch);
+	struct htab_elem *node_to_free = NULL, *l;
+	u32 batch = 0, max_count, total = 0;
+	u32 key_size, value_size, elem_size;
+	void *keys = NULL, *values = NULL;
+	u64 elem_flags = attr->batch.elem_flags;
+	int ret = 0;
+
+	if (attr->batch.flags || (elem_flags & ~BPF_F_LOCK) ||
+	    ((elem_flags & BPF_F_LOCK) && !map_value_has_spin_lock(map)))
+		return -EINVAL;
+
+	max_count = attr->batch.count;
+	if (!max_count)
+		return 0;
+	if (put_user(0, &uattr->batch.count))
+		return -EFAULT;
+	if (ubatch && copy_from_user(&batch, ubatch, sizeof(batch)))
+		return -EFAULT;
+	if (batch >= htab->n_buckets)
+		return -ENOENT;
+
+	key_size = map->key_size;
+	elem_size = round_up(map->value_size, 8);
+	value_size = is_percpu ? elem_size * num_possible_cpus() :
+		map->value_size;
+	keys = kvmalloc_array(max_count, key_size,
+			      GFP_USER | __GFP_NOWARN);
+	values = kvmalloc_array(max_count, value_size,
+				GFP_USER | __GFP_NOWARN);
+	if (!keys || !values) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	while (batch < htab->n_buckets && total < max_count) {
+		struct hlist_nulls_head *head = &htab->buckets[batch].head;
+		struct hlist_nulls_node *n;
+		unsigned long flags;
+		u32 bucket_count = 0;
+
+		preempt_disable();
+		__this_cpu_inc(bpf_prog_active);
+		rcu_read_lock();
+		raw_spin_lock_irqsave(&htab->buckets[batch].lock, flags);
+
+		hlist_nulls_for_each_entry_rcu(l, n, head, hash_node)
+			bucket_count++;
+		if (bucket_count > max_count - total) {
+			ret = total ? 0 : -ENOSPC;
+			raw_spin_unlock_irqrestore(&htab->buckets[batch].lock,
+						   flags);
+			rcu_read_unlock();
+			__this_cpu_dec(bpf_prog_active);
+			preempt_enable();
+			break;
+		}
+
+		hlist_nulls_for_each_entry_safe(l, n, head, hash_node) {
+			void *dst_key = keys + total * key_size;
+			void *dst_value = values + total * value_size;
+
+			memcpy(dst_key, l->key, key_size);
+			if (is_percpu) {
+				void __percpu *pptr;
+				int cpu, off = 0;
+
+				pptr = htab_elem_get_ptr(l, key_size);
+				for_each_possible_cpu(cpu) {
+					bpf_long_memcpy(dst_value + off,
+							per_cpu_ptr(pptr, cpu),
+							elem_size);
+					off += elem_size;
+				}
+			} else {
+				void *src_value = l->key + round_up(key_size, 8);
+
+				if (elem_flags & BPF_F_LOCK)
+					copy_map_value_locked(map, dst_value,
+							      src_value, true);
+				else
+					copy_map_value(map, dst_value, src_value);
+				check_and_init_map_lock(map, dst_value);
+			}
+
+			if (do_delete) {
+				hlist_nulls_del_rcu(&l->hash_node);
+				if (is_lru) {
+					l->batch_flink = node_to_free;
+					node_to_free = l;
+				} else {
+					free_htab_elem(htab, l);
+				}
+			}
+			total++;
+		}
+
+		raw_spin_unlock_irqrestore(&htab->buckets[batch].lock, flags);
+		rcu_read_unlock();
+		__this_cpu_dec(bpf_prog_active);
+		preempt_enable();
+
+		while (node_to_free) {
+			l = node_to_free;
+			node_to_free = l->batch_flink;
+			bpf_lru_push_free(&htab->lru, &l->lru_node);
+		}
+
+		batch++;
+		cond_resched();
+	}
+
+	if (batch >= htab->n_buckets)
+		ret = -ENOENT;
+	if (total &&
+	    (copy_to_user(ukeys, keys, total * key_size) ||
+	     copy_to_user(uvalues, values, total * value_size))) {
+		ret = -EFAULT;
+		goto out;
+	}
+	if (copy_to_user(uobatch, &batch, sizeof(batch)) ||
+	    put_user(total, &uattr->batch.count))
+		ret = -EFAULT;
+out:
+	kvfree(values);
+	kvfree(keys);
+	return ret;
+}
+
+static int htab_map_lookup_batch(struct bpf_map *map,
+				 const union bpf_attr *attr,
+				 union bpf_attr __user *uattr)
+{
+	return __htab_map_lookup_and_delete_batch(map, attr, uattr, false,
+						  false, false);
+}
+
+static int htab_map_lookup_and_delete_batch(struct bpf_map *map,
+					    const union bpf_attr *attr,
+					    union bpf_attr __user *uattr)
+{
+	return __htab_map_lookup_and_delete_batch(map, attr, uattr, true,
+						  false, false);
+}
+
+static int htab_lru_map_lookup_batch(struct bpf_map *map,
+				     const union bpf_attr *attr,
+				     union bpf_attr __user *uattr)
+{
+	return __htab_map_lookup_and_delete_batch(map, attr, uattr, false,
+						  true, false);
+}
+
+static int htab_lru_map_lookup_and_delete_batch(struct bpf_map *map,
+						const union bpf_attr *attr,
+						union bpf_attr __user *uattr)
+{
+	return __htab_map_lookup_and_delete_batch(map, attr, uattr, true,
+						  true, false);
+}
+
+static int htab_percpu_map_lookup_batch(struct bpf_map *map,
+					const union bpf_attr *attr,
+					union bpf_attr __user *uattr)
+{
+	return __htab_map_lookup_and_delete_batch(map, attr, uattr, false,
+						  false, true);
+}
+
+static int htab_percpu_map_lookup_and_delete_batch(
+	struct bpf_map *map, const union bpf_attr *attr,
+	union bpf_attr __user *uattr)
+{
+	return __htab_map_lookup_and_delete_batch(map, attr, uattr, true,
+						  false, true);
+}
+
+static int htab_lru_percpu_map_lookup_batch(struct bpf_map *map,
+					    const union bpf_attr *attr,
+					    union bpf_attr __user *uattr)
+{
+	return __htab_map_lookup_and_delete_batch(map, attr, uattr, false,
+						  true, true);
+}
+
+static int htab_lru_percpu_map_lookup_and_delete_batch(
+	struct bpf_map *map, const union bpf_attr *attr,
+	union bpf_attr __user *uattr)
+{
+	return __htab_map_lookup_and_delete_batch(map, attr, uattr, true,
+						  true, true);
+}
+
 const struct bpf_map_ops htab_map_ops = {
 	.map_alloc = htab_map_alloc,
 	.map_free = htab_map_free,
 	.map_get_next_key = htab_map_get_next_key,
+	.map_lookup_batch = htab_map_lookup_batch,
+	.map_lookup_and_delete_batch = htab_map_lookup_and_delete_batch,
+	.map_update_batch = generic_map_update_batch,
+	.map_delete_batch = generic_map_delete_batch,
 	.map_lookup_elem = htab_map_lookup_elem,
 	.map_update_elem = htab_map_update_elem,
 	.map_delete_elem = htab_map_delete_elem,
@@ -1164,6 +1393,10 @@ const struct bpf_map_ops htab_lru_map_ops = {
 	.map_alloc = htab_map_alloc,
 	.map_free = htab_map_free,
 	.map_get_next_key = htab_map_get_next_key,
+	.map_lookup_batch = htab_lru_map_lookup_batch,
+	.map_lookup_and_delete_batch = htab_lru_map_lookup_and_delete_batch,
+	.map_update_batch = generic_map_update_batch,
+	.map_delete_batch = generic_map_delete_batch,
 	.map_lookup_elem = htab_lru_map_lookup_elem,
 	.map_lookup_elem_sys_only = htab_lru_map_lookup_elem_sys,
 	.map_update_elem = htab_lru_map_update_elem,
@@ -1248,6 +1481,10 @@ const struct bpf_map_ops htab_percpu_map_ops = {
 	.map_alloc = htab_map_alloc,
 	.map_free = htab_map_free,
 	.map_get_next_key = htab_map_get_next_key,
+	.map_lookup_batch = htab_percpu_map_lookup_batch,
+	.map_lookup_and_delete_batch = htab_percpu_map_lookup_and_delete_batch,
+	.map_update_batch = generic_map_update_batch,
+	.map_delete_batch = generic_map_delete_batch,
 	.map_lookup_elem = htab_percpu_map_lookup_elem,
 	.map_update_elem = htab_percpu_map_update_elem,
 	.map_delete_elem = htab_map_delete_elem,
@@ -1257,6 +1494,10 @@ const struct bpf_map_ops htab_lru_percpu_map_ops = {
 	.map_alloc = htab_map_alloc,
 	.map_free = htab_map_free,
 	.map_get_next_key = htab_map_get_next_key,
+	.map_lookup_batch = htab_lru_percpu_map_lookup_batch,
+	.map_lookup_and_delete_batch = htab_lru_percpu_map_lookup_and_delete_batch,
+	.map_update_batch = generic_map_update_batch,
+	.map_delete_batch = generic_map_delete_batch,
 	.map_lookup_elem = htab_lru_percpu_map_lookup_elem,
 	.map_update_elem = htab_lru_percpu_map_update_elem,
 	.map_delete_elem = htab_lru_map_delete_elem,

@@ -76,6 +76,9 @@ modules.builtin
 !.gitignore
 !.mailmap
 !.cocciconfig
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml
 
 #
 # Generated include files
@@ -133,3 +136,7 @@ Android.bp
 
 # Object directory
 out/
+
+# Python bytecode caches
+__pycache__/
+*.py[cod]

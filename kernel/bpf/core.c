@@ -21,12 +21,14 @@
  * Kris Katterjohn - Added many additional checks in bpf_check_classic()
  */
 
+#include <uapi/linux/btf.h>
 #include <linux/filter.h>
 #include <linux/skbuff.h>
 #include <linux/vmalloc.h>
 #include <linux/random.h>
 #include <linux/moduleloader.h>
 #include <linux/bpf.h>
+#include <linux/btf.h>
 #include <linux/frame.h>
 #include <linux/rbtree_latch.h>
 #include <linux/kallsyms.h>
@@ -176,7 +178,8 @@ int bpf_prog_calc_tag(struct bpf_prog *fp)
 		dst[i] = fp->insnsi[i];
 		if (!was_ld_map &&
 		    dst[i].code == (BPF_LD | BPF_IMM | BPF_DW) &&
-		    dst[i].src_reg == BPF_PSEUDO_MAP_FD) {
+		    (dst[i].src_reg == BPF_PSEUDO_MAP_FD ||
+		     dst[i].src_reg == BPF_PSEUDO_MAP_VALUE)) {
 			was_ld_map = true;
 			dst[i].imm = 0;
 		} else if (was_ld_map &&
@@ -222,7 +225,8 @@ int bpf_prog_calc_tag(struct bpf_prog *fp)
 
 static bool bpf_is_jmp_and_has_target(const struct bpf_insn *insn)
 {
-	return BPF_CLASS(insn->code) == BPF_JMP  &&
+	return (BPF_CLASS(insn->code) == BPF_JMP ||
+		BPF_CLASS(insn->code) == BPF_JMP32) &&
 	       /* Call and Exit are both special jumps with no
 		* target inside the BPF instruction image.
 		*/
@@ -274,6 +278,18 @@ static int bpf_adj_branches(struct bpf_prog *prog, u32 pos, u32 delta,
 	}
 
 	return ret;
+}
+
+static void bpf_adj_linfo(struct bpf_prog *prog, u32 off, u32 delta)
+{
+	struct bpf_line_info *linfo = prog->aux->linfo;
+	u32 i;
+
+	if (!linfo || !delta)
+		return;
+	for (i = 0; i < prog->aux->nr_linfo; i++)
+		if (off < linfo[i].insn_off)
+			linfo[i].insn_off += delta;
 }
 
 struct bpf_prog *bpf_patch_insn_single(struct bpf_prog *prog, u32 off,
@@ -330,6 +346,7 @@ struct bpf_prog *bpf_patch_insn_single(struct bpf_prog *prog, u32 off,
 	 * overflow cannot happen at this point.
 	 */
 	BUG_ON(bpf_adj_branches(prog_adj, off, insn_delta, false));
+	bpf_adj_linfo(prog_adj, off, insn_delta);
 
 	return prog_adj;
 }
@@ -358,12 +375,33 @@ bpf_get_prog_addr_region(const struct bpf_prog *prog,
 
 static void bpf_get_prog_name(const struct bpf_prog *prog, char *sym)
 {
+	const char *end = sym + KSYM_NAME_LEN;
+	const struct btf_type *type;
+	const char *func_name;
 	BUILD_BUG_ON(sizeof("bpf_prog_") +
 		     sizeof(prog->tag) * 2 + 1 > KSYM_NAME_LEN);
 
 	sym += snprintf(sym, KSYM_NAME_LEN, "bpf_prog_");
 	sym  = bin2hex(sym, prog->tag, sizeof(prog->tag));
-	*sym = 0;
+
+	/* prog->aux->name will be ignored if full btf name is available */
+	if (prog->aux->btf) {
+		type = btf_type_by_id(prog->aux->btf, prog->aux->type_id);
+		if (type) {
+			func_name = btf_name_by_offset(prog->aux->btf,
+					       type->name_off);
+			if (func_name) {
+				snprintf(sym, (size_t)(end - sym), "_%s",
+					 func_name);
+				return;
+			}
+		}
+	}
+
+	if (prog->aux->name[0])
+		snprintf(sym, (size_t)(end - sym), "_%s", prog->aux->name);
+	else
+		*sym = 0;
 }
 
 static __always_inline unsigned long
@@ -735,6 +773,27 @@ static int bpf_jit_blind_insn(const struct bpf_insn *from,
 		*to++ = BPF_JMP_REG(from->code, from->dst_reg, BPF_REG_AX, off);
 		break;
 
+	case BPF_JMP32 | BPF_JEQ  | BPF_K:
+	case BPF_JMP32 | BPF_JNE  | BPF_K:
+	case BPF_JMP32 | BPF_JGT  | BPF_K:
+	case BPF_JMP32 | BPF_JLT  | BPF_K:
+	case BPF_JMP32 | BPF_JGE  | BPF_K:
+	case BPF_JMP32 | BPF_JLE  | BPF_K:
+	case BPF_JMP32 | BPF_JSGT | BPF_K:
+	case BPF_JMP32 | BPF_JSLT | BPF_K:
+	case BPF_JMP32 | BPF_JSGE | BPF_K:
+	case BPF_JMP32 | BPF_JSLE | BPF_K:
+	case BPF_JMP32 | BPF_JSET | BPF_K:
+		off = from->off;
+		if (off < 0)
+			off -= 2;
+		*to++ = BPF_ALU32_IMM(BPF_MOV, BPF_REG_AX,
+				      imm_rnd ^ from->imm);
+		*to++ = BPF_ALU32_IMM(BPF_XOR, BPF_REG_AX, imm_rnd);
+		*to++ = BPF_JMP32_REG(from->code, from->dst_reg,
+				      BPF_REG_AX, off);
+		break;
+
 	case BPF_LD | BPF_ABS | BPF_W:
 	case BPF_LD | BPF_ABS | BPF_H:
 	case BPF_LD | BPF_ABS | BPF_B:
@@ -975,6 +1034,28 @@ static unsigned int ___bpf_prog_run(u64 *regs, const struct bpf_insn *insn,
 		[BPF_JMP | BPF_JSLE | BPF_K] = &&JMP_JSLE_K,
 		[BPF_JMP | BPF_JSET | BPF_X] = &&JMP_JSET_X,
 		[BPF_JMP | BPF_JSET | BPF_K] = &&JMP_JSET_K,
+		[BPF_JMP32 | BPF_JEQ | BPF_X] = &&JMP32_JEQ_X,
+		[BPF_JMP32 | BPF_JEQ | BPF_K] = &&JMP32_JEQ_K,
+		[BPF_JMP32 | BPF_JNE | BPF_X] = &&JMP32_JNE_X,
+		[BPF_JMP32 | BPF_JNE | BPF_K] = &&JMP32_JNE_K,
+		[BPF_JMP32 | BPF_JGT | BPF_X] = &&JMP32_JGT_X,
+		[BPF_JMP32 | BPF_JGT | BPF_K] = &&JMP32_JGT_K,
+		[BPF_JMP32 | BPF_JLT | BPF_X] = &&JMP32_JLT_X,
+		[BPF_JMP32 | BPF_JLT | BPF_K] = &&JMP32_JLT_K,
+		[BPF_JMP32 | BPF_JGE | BPF_X] = &&JMP32_JGE_X,
+		[BPF_JMP32 | BPF_JGE | BPF_K] = &&JMP32_JGE_K,
+		[BPF_JMP32 | BPF_JLE | BPF_X] = &&JMP32_JLE_X,
+		[BPF_JMP32 | BPF_JLE | BPF_K] = &&JMP32_JLE_K,
+		[BPF_JMP32 | BPF_JSGT | BPF_X] = &&JMP32_JSGT_X,
+		[BPF_JMP32 | BPF_JSGT | BPF_K] = &&JMP32_JSGT_K,
+		[BPF_JMP32 | BPF_JSLT | BPF_X] = &&JMP32_JSLT_X,
+		[BPF_JMP32 | BPF_JSLT | BPF_K] = &&JMP32_JSLT_K,
+		[BPF_JMP32 | BPF_JSGE | BPF_X] = &&JMP32_JSGE_X,
+		[BPF_JMP32 | BPF_JSGE | BPF_K] = &&JMP32_JSGE_K,
+		[BPF_JMP32 | BPF_JSLE | BPF_X] = &&JMP32_JSLE_X,
+		[BPF_JMP32 | BPF_JSLE | BPF_K] = &&JMP32_JSLE_K,
+		[BPF_JMP32 | BPF_JSET | BPF_X] = &&JMP32_JSET_X,
+		[BPF_JMP32 | BPF_JSET | BPF_K] = &&JMP32_JSET_K,
 		/* Program return */
 		[BPF_JMP | BPF_EXIT] = &&JMP_EXIT,
 		/* Store instructions */
@@ -1297,6 +1378,32 @@ out:
 		CONT;
 	JMP_EXIT:
 		return BPF_R0;
+
+#define COND_JMP32(SIGN, OPCODE, CMP_OP)                         \
+	JMP32_##OPCODE##_X:                                        \
+		if ((SIGN##32)DST CMP_OP (SIGN##32)SRC) {            \
+			insn += insn->off;                              \
+			CONT_JMP;                                       \
+		}                                                       \
+		CONT;                                                   \
+	JMP32_##OPCODE##_K:                                        \
+		if ((SIGN##32)DST CMP_OP (SIGN##32)IMM) {            \
+			insn += insn->off;                              \
+			CONT_JMP;                                       \
+		}                                                       \
+		CONT;
+	COND_JMP32(u, JEQ, ==)
+	COND_JMP32(u, JNE, !=)
+	COND_JMP32(u, JGT, >)
+	COND_JMP32(u, JLT, <)
+	COND_JMP32(u, JGE, >=)
+	COND_JMP32(u, JLE, <=)
+	COND_JMP32(u, JSET, &)
+	COND_JMP32(s, JSGT, >)
+	COND_JMP32(s, JSLT, <)
+	COND_JMP32(s, JSGE, >=)
+	COND_JMP32(s, JSLE, <=)
+#undef COND_JMP32
 
 	/* STX and ST and LDX*/
 #define LDST(SIZEOP, SIZE)						\
@@ -1646,6 +1753,19 @@ int bpf_prog_array_length(struct bpf_prog_array __rcu *progs)
 		cnt++;
 	rcu_read_unlock();
 	return cnt;
+}
+
+bool bpf_prog_array_is_empty(struct bpf_prog_array *progs)
+{
+	struct bpf_prog **prog;
+
+	if (!progs)
+		return true;
+
+	for (prog = progs->progs; *prog; prog++)
+		if (*prog != &dummy_bpf_prog.prog)
+			return false;
+	return true;
 }
 
 int bpf_prog_array_copy_to_user(struct bpf_prog_array __rcu *progs,

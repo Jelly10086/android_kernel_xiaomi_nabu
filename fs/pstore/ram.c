@@ -35,7 +35,6 @@
 #include <linux/pstore_ram.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
-#include <linux/memblock.h>
 
 #define RAMOOPS_KERNMSG_HDR "===="
 #define MIN_MEM_SIZE 4096UL
@@ -72,10 +71,15 @@ module_param(mem_type, uint, 0600);
 MODULE_PARM_DESC(mem_type,
 		"set to 1 to try to use unbuffered memory (default 0)");
 
-static int dump_oops = 1;
-module_param(dump_oops, int, 0600);
+static int ramoops_max_reason = -1;
+module_param_named(max_reason, ramoops_max_reason, int, 0400);
+MODULE_PARM_DESC(max_reason,
+		"maximum reason for kmsg dump (default 2: Oops and Panic)");
+
+static int ramoops_dump_oops = -1;
+module_param_named(dump_oops, ramoops_dump_oops, int, 0400);
 MODULE_PARM_DESC(dump_oops,
-		"set to 1 to dump oopses, 0 to only dump panics (default 1)");
+		"deprecated: use max_reason; 1 dumps oopses and panics, 0 only panics");
 
 static int ramoops_ecc;
 module_param_named(ecc, ramoops_ecc, int, 0600);
@@ -96,7 +100,6 @@ struct ramoops_context {
 	size_t console_size;
 	size_t ftrace_size;
 	size_t pmsg_size;
-	int dump_oops;
 	u32 flags;
 	struct persistent_ram_ecc_info ecc_info;
 	unsigned int max_dump_cnt;
@@ -409,18 +412,6 @@ static int notrace ramoops_pstore_write(struct pstore_record *record)
 		return -EINVAL;
 
 	/*
-	 * Out of the various dmesg dump types, ramoops is currently designed
-	 * to only store crash logs, rather than storing general kernel logs.
-	 */
-	if (record->reason != KMSG_DUMP_OOPS &&
-	    record->reason != KMSG_DUMP_PANIC)
-		return -EINVAL;
-
-	/* Skip Oopes when configured to do so. */
-	if (record->reason == KMSG_DUMP_OOPS && !cxt->dump_oops)
-		return -EINVAL;
-
-	/*
 	 * Explicitly only take the first part of any new crash.
 	 * If our buffer is larger than kmsg_bytes, this can never happen,
 	 * and if our buffer is smaller than kmsg_bytes, we don't want the
@@ -698,7 +689,8 @@ static int ramoops_parse_dt(struct platform_device *pdev,
 	pdata->mem_size = resource_size(res);
 	pdata->mem_address = res->start;
 	pdata->mem_type = of_property_read_bool(of_node, "unbuffered");
-	pdata->dump_oops = !of_property_read_bool(of_node, "no-dump-oops");
+	pdata->max_reason = of_property_read_bool(of_node, "no-dump-oops") ?
+		KMSG_DUMP_PANIC : KMSG_DUMP_OOPS;
 
 #define parse_size(name, field) {					\
 		ret = ramoops_parse_dt_size(pdev, name, &value);	\
@@ -715,6 +707,18 @@ static int ramoops_parse_dt(struct platform_device *pdev,
 	parse_size("flags", pdata->flags);
 
 #undef parse_size
+
+	ret = of_property_read_u32(of_node, "max-reason", &value);
+	if (!ret) {
+		if (value > KMSG_DUMP_POWEROFF) {
+			dev_err(&pdev->dev, "invalid max-reason %u\n", value);
+			return -EINVAL;
+		}
+		pdata->max_reason = value;
+	} else if (ret != -EINVAL) {
+		dev_err(&pdev->dev, "failed to parse max-reason: %d\n", ret);
+		return ret;
+	}
 
 	return 0;
 }
@@ -782,7 +786,6 @@ static int ramoops_probe(struct platform_device *pdev)
 	cxt->console_size = pdata->console_size;
 	cxt->ftrace_size = pdata->ftrace_size;
 	cxt->pmsg_size = pdata->pmsg_size;
-	cxt->dump_oops = pdata->dump_oops;
 	cxt->flags = pdata->flags;
 	cxt->ecc_info = pdata->ecc_info;
 
@@ -825,8 +828,10 @@ static int ramoops_probe(struct platform_device *pdev)
 	 * the single region size is how to check.
 	 */
 	cxt->pstore.flags = 0;
-	if (cxt->max_dump_cnt)
+	if (cxt->max_dump_cnt) {
 		cxt->pstore.flags |= PSTORE_FLAGS_DMESG;
+		cxt->pstore.max_reason = pdata->max_reason;
+	}
 	if (cxt->console_size)
 		cxt->pstore.flags |= PSTORE_FLAGS_CONSOLE;
 	if (cxt->max_ftrace_cnt)
@@ -862,7 +867,7 @@ static int ramoops_probe(struct platform_device *pdev)
 	mem_size = pdata->mem_size;
 	mem_address = pdata->mem_address;
 	record_size = pdata->record_size;
-	dump_oops = pdata->dump_oops;
+	ramoops_max_reason = pdata->max_reason;
 	ramoops_console_size = pdata->console_size;
 	ramoops_pmsg_size = pdata->pmsg_size;
 	ramoops_ftrace_size = pdata->ftrace_size;
@@ -937,7 +942,13 @@ static void ramoops_register_dummy(void)
 	dummy_data->console_size = ramoops_console_size;
 	dummy_data->ftrace_size = ramoops_ftrace_size;
 	dummy_data->pmsg_size = ramoops_pmsg_size;
-	dummy_data->dump_oops = dump_oops;
+	if (ramoops_max_reason >= 0)
+		dummy_data->max_reason = ramoops_max_reason;
+	else if (ramoops_dump_oops != -1)
+		dummy_data->max_reason = ramoops_dump_oops ? KMSG_DUMP_OOPS :
+							KMSG_DUMP_PANIC;
+	else
+		dummy_data->max_reason = KMSG_DUMP_OOPS;
 	dummy_data->flags = RAMOOPS_FLAG_FTRACE_PER_CPU;
 
 	/*
@@ -953,49 +964,6 @@ static void ramoops_register_dummy(void)
 			PTR_ERR(dummy));
 	}
 }
-
-static struct ramoops_platform_data ramoops_data;
-
-static struct platform_device ramoops_dev  = {
-	.name = "ramoops",
-	.dev = {
-		.platform_data = &ramoops_data,
-	},
-};
-
-static int __init ramoops_memreserve(char *p)
-{
-	unsigned long size;
-
-	if (!p)
-		return 1;
-
-	size = memparse(p, &p) & PAGE_MASK;
-	ramoops_data.mem_size = size;
-	ramoops_data.mem_address = 0xB0000000;
-	ramoops_data.console_size = size / 2;
-	ramoops_data.pmsg_size = size / 2;
-	ramoops_data.dump_oops = 1;
-
-	pr_info("msm_reserve_ramoops_memory addr=%llx,size=%lx\n",
-		ramoops_data.mem_address, ramoops_data.mem_size);
-	pr_info("msm_reserve_ramoops_memory record_size=%lx,ftrace_size=%lx\n",
-		ramoops_data.record_size, ramoops_data.ftrace_size);
-
-	memblock_reserve(ramoops_data.mem_address, ramoops_data.mem_size);
-
-	return 0;
-}
-early_param("ramoops_memreserve", ramoops_memreserve);
-
-static int __init msm_register_ramoops_device(void)
-{
-	pr_info("msm_register_ramoops_device\n");
-	if (platform_device_register(&ramoops_dev))
-		pr_info("Unable to register ramoops platform device\n");
-	return 0;
-}
-core_initcall(msm_register_ramoops_device);
 
 static int __init ramoops_init(void)
 {

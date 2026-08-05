@@ -97,6 +97,8 @@ struct pstore_record {
  *
  * @read_mutex:	serializes @open, @read, @close, and @erase callbacks
  * @flags:	bitfield of frontends the backend can accept writes for
+ * @max_reason:	highest kmsg_dump_reason accepted by the dmesg frontend;
+ *		KMSG_DUMP_UNDEF keeps the default printk filtering
  * @data:	backend-private pointer passed back during callbacks
  *
  * Callbacks:
@@ -180,6 +182,7 @@ struct pstore_info {
 	struct mutex	read_mutex;
 
 	int		flags;
+	int		max_reason;
 	void		*data;
 
 	int		(*open)(struct pstore_info *psi);

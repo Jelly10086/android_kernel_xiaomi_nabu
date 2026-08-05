@@ -11,10 +11,13 @@
 #include <linux/kernel.h>
 #include <linux/atomic.h>
 #include <linux/cgroup.h>
+#include <linux/filter.h>
 #include <linux/slab.h>
+#include <linux/sysctl.h>
 #include <linux/bpf.h>
 #include <linux/bpf-cgroup.h>
 #include <net/sock.h>
+#include <net/bpf_sk_storage.h>
 
 DEFINE_STATIC_KEY_FALSE(cgroup_bpf_enabled_key);
 EXPORT_SYMBOL(cgroup_bpf_enabled_key);
@@ -502,6 +505,7 @@ EXPORT_SYMBOL(__cgroup_bpf_run_filter_sk);
  * @sk: sock struct that will use sockaddr
  * @uaddr: sockaddr struct provided by user
  * @type: The type of program to be exectuted
+ * @t_ctx: Pointer to attach type specific context
  *
  * socket is expected to be of type INET or INET6.
  *
@@ -510,12 +514,15 @@ EXPORT_SYMBOL(__cgroup_bpf_run_filter_sk);
  */
 int __cgroup_bpf_run_filter_sock_addr(struct sock *sk,
 				      struct sockaddr *uaddr,
-				      enum bpf_attach_type type)
+				      enum bpf_attach_type type,
+				      void *t_ctx)
 {
 	struct bpf_sock_addr_kern ctx = {
 		.sk = sk,
 		.uaddr = uaddr,
+		.t_ctx = t_ctx,
 	};
+	struct sockaddr_storage unspec;
 	struct cgroup *cgrp;
 	int ret;
 
@@ -524,6 +531,11 @@ int __cgroup_bpf_run_filter_sock_addr(struct sock *sk,
 	 */
 	if (sk->sk_family != AF_INET && sk->sk_family != AF_INET6)
 		return 0;
+
+	if (!ctx.uaddr) {
+		memset(&unspec, 0, sizeof(unspec));
+		ctx.uaddr = (struct sockaddr *)&unspec;
+	}
 
 	cgrp = sock_cgroup_ptr(&sk->sk_cgrp_data);
 	ret = BPF_PROG_RUN_ARRAY(cgrp->bpf.effective[type], &ctx, BPF_PROG_RUN);
@@ -560,3 +572,584 @@ int __cgroup_bpf_run_filter_sock_ops(struct sock *sk,
 	return ret == 1 ? 0 : -EPERM;
 }
 EXPORT_SYMBOL(__cgroup_bpf_run_filter_sock_ops);
+
+int __cgroup_bpf_run_filter_sysctl(struct ctl_table_header *head,
+				   struct ctl_table *table, int write,
+				   void __user *buf, size_t *pcount,
+				   loff_t *ppos, void **new_buf,
+				   enum bpf_attach_type type)
+{
+	struct bpf_sysctl_kern ctx = {
+		.head = head,
+		.table = table,
+		.write = write,
+		.ppos = ppos,
+		.cur_len = PAGE_SIZE,
+	};
+	struct cgroup *cgrp;
+	int ret;
+
+	ctx.cur_val = kmalloc(ctx.cur_len, GFP_KERNEL);
+	if (ctx.cur_val) {
+		mm_segment_t old_fs = get_fs();
+		loff_t pos = 0;
+
+		set_fs(KERNEL_DS);
+		if (table->proc_handler(table, 0,
+					(void __user *)ctx.cur_val,
+					&ctx.cur_len, &pos))
+			ctx.cur_len = 0;
+		set_fs(old_fs);
+	} else {
+		ctx.cur_len = 0;
+	}
+
+	if (write && buf && *pcount) {
+		ctx.new_val = kmalloc(PAGE_SIZE, GFP_KERNEL);
+		ctx.new_len = min_t(size_t, PAGE_SIZE, *pcount);
+		if (!ctx.new_val ||
+		    copy_from_user(ctx.new_val, buf, ctx.new_len))
+			ctx.new_len = 0;
+	}
+
+	cgrp = task_dfl_cgroup(current);
+	ret = BPF_PROG_RUN_ARRAY(cgrp->bpf.effective[type], &ctx,
+				 BPF_PROG_RUN);
+
+	kfree(ctx.cur_val);
+	if (ret == 1 && ctx.new_updated) {
+		*new_buf = ctx.new_val;
+		*pcount = ctx.new_len;
+	} else {
+		kfree(ctx.new_val);
+	}
+
+	return ret == 1 ? 0 : -EPERM;
+}
+EXPORT_SYMBOL(__cgroup_bpf_run_filter_sysctl);
+
+static bool __cgroup_bpf_prog_array_is_empty(struct cgroup *cgrp,
+					     enum bpf_attach_type type)
+{
+	struct bpf_prog_array *array;
+	bool empty;
+
+	rcu_read_lock();
+	array = rcu_dereference(cgrp->bpf.effective[type]);
+	empty = bpf_prog_array_is_empty(array);
+	rcu_read_unlock();
+	return empty;
+}
+
+static int sockopt_alloc_buf(struct bpf_sockopt_kern *ctx, int max_optlen)
+{
+	if (max_optlen < 0)
+		return -EINVAL;
+	if (max_optlen > PAGE_SIZE)
+		max_optlen = PAGE_SIZE;
+
+	ctx->optval = kzalloc(max_optlen, GFP_USER);
+	if (!ctx->optval)
+		return -ENOMEM;
+	ctx->optval_end = ctx->optval + max_optlen;
+	return max_optlen;
+}
+
+static void sockopt_free_buf(struct bpf_sockopt_kern *ctx)
+{
+	kfree(ctx->optval);
+}
+
+int __cgroup_bpf_run_filter_setsockopt(struct sock *sk, int *level,
+				       int *optname, char __user *optval,
+				       int *optlen, char **kernel_optval)
+{
+	struct cgroup *cgrp = sock_cgroup_ptr(&sk->sk_cgrp_data);
+	struct bpf_sockopt_kern ctx = {
+		.sk = sk,
+		.level = *level,
+		.optname = *optname,
+	};
+	int ret, max_optlen;
+
+	if (__cgroup_bpf_prog_array_is_empty(cgrp, BPF_CGROUP_SETSOCKOPT))
+		return 0;
+
+	max_optlen = max_t(int, 16, *optlen);
+	max_optlen = sockopt_alloc_buf(&ctx, max_optlen);
+	if (max_optlen < 0)
+		return max_optlen;
+
+	ctx.optlen = *optlen;
+	if (copy_from_user(ctx.optval, optval,
+			   min(*optlen, max_optlen))) {
+		ret = -EFAULT;
+		goto out;
+	}
+
+	lock_sock(sk);
+	ret = BPF_PROG_RUN_ARRAY(cgrp->bpf.effective[BPF_CGROUP_SETSOCKOPT],
+				 &ctx, BPF_PROG_RUN);
+	release_sock(sk);
+	if (!ret) {
+		ret = -EPERM;
+		goto out;
+	}
+
+	if (ctx.optlen == -1) {
+		ret = 1;
+	} else if (ctx.optlen > max_optlen || ctx.optlen < -1) {
+		ret = -EFAULT;
+	} else {
+		ret = 0;
+		*level = ctx.level;
+		*optname = ctx.optname;
+		if (ctx.optlen != 0) {
+			*optlen = ctx.optlen;
+			*kernel_optval = (char *)ctx.optval;
+			return 0;
+		}
+	}
+
+out:
+	sockopt_free_buf(&ctx);
+	return ret;
+}
+EXPORT_SYMBOL(__cgroup_bpf_run_filter_setsockopt);
+
+int __cgroup_bpf_run_filter_getsockopt(struct sock *sk, int level,
+				       int optname, char __user *optval,
+				       int __user *optlen, int max_optlen,
+				       int retval)
+{
+	struct cgroup *cgrp = sock_cgroup_ptr(&sk->sk_cgrp_data);
+	struct bpf_sockopt_kern ctx = {
+		.sk = sk,
+		.level = level,
+		.optname = optname,
+		.retval = retval,
+		.optlen = max_optlen,
+	};
+	int ret;
+
+	if (max_optlen < 0)
+		return max_optlen;
+	if (__cgroup_bpf_prog_array_is_empty(cgrp, BPF_CGROUP_GETSOCKOPT))
+		return retval;
+
+	max_optlen = sockopt_alloc_buf(&ctx, max_optlen);
+	if (max_optlen < 0)
+		return max_optlen;
+
+	if (!retval) {
+		if (get_user(ctx.optlen, optlen)) {
+			ret = -EFAULT;
+			goto out;
+		}
+		if (ctx.optlen < 0 ||
+		    copy_from_user(ctx.optval, optval,
+				   min(ctx.optlen, max_optlen))) {
+			ret = -EFAULT;
+			goto out;
+		}
+	}
+
+	lock_sock(sk);
+	ret = BPF_PROG_RUN_ARRAY(cgrp->bpf.effective[BPF_CGROUP_GETSOCKOPT],
+				 &ctx, BPF_PROG_RUN);
+	release_sock(sk);
+	if (!ret) {
+		ret = -EPERM;
+		goto out;
+	}
+
+	if ((optval && (ctx.optlen > max_optlen || ctx.optlen < 0)) ||
+	    (ctx.retval != 0 && ctx.retval != retval)) {
+		ret = -EFAULT;
+		goto out;
+	}
+
+	if (ctx.optlen) {
+		if (optval && copy_to_user(optval, ctx.optval, ctx.optlen)) {
+			ret = -EFAULT;
+			goto out;
+		}
+		if (put_user(ctx.optlen, optlen)) {
+			ret = -EFAULT;
+			goto out;
+		}
+	}
+	ret = ctx.retval;
+
+out:
+	sockopt_free_buf(&ctx);
+	return ret;
+}
+EXPORT_SYMBOL(__cgroup_bpf_run_filter_getsockopt);
+
+static const struct bpf_func_proto *
+cgroup_base_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
+{
+	switch (func_id) {
+	case BPF_FUNC_map_lookup_elem:
+		return &bpf_map_lookup_elem_proto;
+	case BPF_FUNC_map_update_elem:
+		return &bpf_map_update_elem_proto;
+	case BPF_FUNC_map_delete_elem:
+		return &bpf_map_delete_elem_proto;
+	case BPF_FUNC_get_current_uid_gid:
+		return &bpf_get_current_uid_gid_proto;
+	case BPF_FUNC_ktime_get_ns:
+		return &bpf_ktime_get_ns_proto;
+	case BPF_FUNC_ktime_get_boot_ns:
+		return &bpf_ktime_get_boot_ns_proto;
+	default:
+		return NULL;
+	}
+}
+
+static ssize_t sysctl_cpy_dir(const struct ctl_dir *dir, char **bufp,
+			      size_t *lenp)
+{
+	ssize_t tmp_ret = 0, ret;
+
+	if (dir->header.parent) {
+		tmp_ret = sysctl_cpy_dir(dir->header.parent, bufp, lenp);
+		if (tmp_ret < 0)
+			return tmp_ret;
+	}
+
+	ret = strscpy(*bufp, dir->header.ctl_table[0].procname, *lenp);
+	if (ret < 0)
+		return ret;
+	*bufp += ret;
+	*lenp -= ret;
+	ret += tmp_ret;
+	if (!ret)
+		return ret;
+
+	tmp_ret = strscpy(*bufp, "/", *lenp);
+	if (tmp_ret < 0)
+		return tmp_ret;
+	*bufp += tmp_ret;
+	*lenp -= tmp_ret;
+	return ret + tmp_ret;
+}
+
+BPF_CALL_4(bpf_sysctl_get_name, struct bpf_sysctl_kern *, ctx, char *, buf,
+	   size_t, buf_len, u64, flags)
+{
+	ssize_t tmp_ret = 0, ret;
+
+	if (!buf || flags & ~BPF_F_SYSCTL_BASE_NAME)
+		return -EINVAL;
+	if (!(flags & BPF_F_SYSCTL_BASE_NAME)) {
+		tmp_ret = sysctl_cpy_dir(ctx->head->parent, &buf, &buf_len);
+		if (tmp_ret < 0)
+			return tmp_ret;
+	}
+	ret = strscpy(buf, ctx->table->procname, buf_len);
+	return ret < 0 ? ret : tmp_ret + ret;
+}
+
+static const struct bpf_func_proto bpf_sysctl_get_name_proto = {
+	.func = bpf_sysctl_get_name,
+	.gpl_only = false,
+	.ret_type = RET_INTEGER,
+	.arg1_type = ARG_PTR_TO_CTX,
+	.arg2_type = ARG_PTR_TO_MEM,
+	.arg3_type = ARG_CONST_SIZE,
+	.arg4_type = ARG_ANYTHING,
+};
+
+static int copy_sysctl_value(char *dst, size_t dst_len, char *src,
+			     size_t src_len)
+{
+	if (!dst)
+		return -EINVAL;
+	if (!dst_len)
+		return -E2BIG;
+	if (!src || !src_len) {
+		memset(dst, 0, dst_len);
+		return -EINVAL;
+	}
+	memcpy(dst, src, min(dst_len, src_len));
+	if (dst_len > src_len) {
+		memset(dst + src_len, 0, dst_len - src_len);
+		return src_len;
+	}
+	dst[dst_len - 1] = '\0';
+	return -E2BIG;
+}
+
+BPF_CALL_3(bpf_sysctl_get_current_value, struct bpf_sysctl_kern *, ctx,
+	   char *, buf, size_t, buf_len)
+{
+	return copy_sysctl_value(buf, buf_len, ctx->cur_val, ctx->cur_len);
+}
+
+static const struct bpf_func_proto bpf_sysctl_get_current_value_proto = {
+	.func = bpf_sysctl_get_current_value,
+	.gpl_only = false,
+	.ret_type = RET_INTEGER,
+	.arg1_type = ARG_PTR_TO_CTX,
+	.arg2_type = ARG_PTR_TO_UNINIT_MEM,
+	.arg3_type = ARG_CONST_SIZE,
+};
+
+BPF_CALL_3(bpf_sysctl_get_new_value, struct bpf_sysctl_kern *, ctx,
+	   char *, buf, size_t, buf_len)
+{
+	if (!ctx->write) {
+		if (buf && buf_len)
+			memset(buf, 0, buf_len);
+		return -EINVAL;
+	}
+	return copy_sysctl_value(buf, buf_len, ctx->new_val, ctx->new_len);
+}
+
+static const struct bpf_func_proto bpf_sysctl_get_new_value_proto = {
+	.func = bpf_sysctl_get_new_value,
+	.gpl_only = false,
+	.ret_type = RET_INTEGER,
+	.arg1_type = ARG_PTR_TO_CTX,
+	.arg2_type = ARG_PTR_TO_UNINIT_MEM,
+	.arg3_type = ARG_CONST_SIZE,
+};
+
+BPF_CALL_3(bpf_sysctl_set_new_value, struct bpf_sysctl_kern *, ctx,
+	   const char *, buf, size_t, buf_len)
+{
+	if (!ctx->write || !ctx->new_val || !ctx->new_len || !buf || !buf_len)
+		return -EINVAL;
+	if (buf_len > PAGE_SIZE - 1)
+		return -E2BIG;
+	memcpy(ctx->new_val, buf, buf_len);
+	ctx->new_len = buf_len;
+	ctx->new_updated = 1;
+	return 0;
+}
+
+static const struct bpf_func_proto bpf_sysctl_set_new_value_proto = {
+	.func = bpf_sysctl_set_new_value,
+	.gpl_only = false,
+	.ret_type = RET_INTEGER,
+	.arg1_type = ARG_PTR_TO_CTX,
+	.arg2_type = ARG_PTR_TO_MEM,
+	.arg3_type = ARG_CONST_SIZE,
+};
+
+static const struct bpf_func_proto *
+sysctl_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
+{
+	switch (func_id) {
+	case BPF_FUNC_strtol:
+		return &bpf_strtol_proto;
+	case BPF_FUNC_strtoul:
+		return &bpf_strtoul_proto;
+	case BPF_FUNC_sysctl_get_name:
+		return &bpf_sysctl_get_name_proto;
+	case BPF_FUNC_sysctl_get_current_value:
+		return &bpf_sysctl_get_current_value_proto;
+	case BPF_FUNC_sysctl_get_new_value:
+		return &bpf_sysctl_get_new_value_proto;
+	case BPF_FUNC_sysctl_set_new_value:
+		return &bpf_sysctl_set_new_value_proto;
+	default:
+		return cgroup_base_func_proto(func_id, prog);
+	}
+}
+
+static bool sysctl_is_valid_access(int off, int size,
+				   enum bpf_access_type type,
+				   const struct bpf_prog *prog,
+				   struct bpf_insn_access_aux *info)
+{
+	const int size_default = sizeof(__u32);
+
+	if (off < 0 || off + size > sizeof(struct bpf_sysctl) || off % size)
+		return false;
+	switch (off) {
+	case bpf_ctx_range(struct bpf_sysctl, write):
+		if (type != BPF_READ)
+			return false;
+		bpf_ctx_record_field_size(info, size_default);
+		return bpf_ctx_narrow_access_ok(off, size, size_default);
+	case bpf_ctx_range(struct bpf_sysctl, file_pos):
+		if (type == BPF_READ) {
+			bpf_ctx_record_field_size(info, size_default);
+			return bpf_ctx_narrow_access_ok(off, size, size_default);
+		}
+		return size == size_default;
+	default:
+		return false;
+	}
+}
+
+static u32 sysctl_convert_ctx_access(enum bpf_access_type type,
+				     const struct bpf_insn *si,
+				     struct bpf_insn *insn_buf,
+				     struct bpf_prog *prog,
+				     u32 *target_size)
+{
+	struct bpf_insn *insn = insn_buf;
+
+	switch (si->off) {
+	case offsetof(struct bpf_sysctl, write):
+		*insn++ = BPF_LDX_MEM(BPF_SIZE(si->code), si->dst_reg,
+				      si->src_reg,
+				      bpf_target_off(struct bpf_sysctl_kern,
+						     write, sizeof(int),
+						     target_size));
+		break;
+	case offsetof(struct bpf_sysctl, file_pos):
+		if (type == BPF_WRITE) {
+			int treg = BPF_REG_9;
+
+			if (si->src_reg == treg || si->dst_reg == treg)
+				--treg;
+			if (si->src_reg == treg || si->dst_reg == treg)
+				--treg;
+			*insn++ = BPF_STX_MEM(BPF_DW, si->dst_reg, treg,
+					      offsetof(struct bpf_sysctl_kern,
+						       tmp_reg));
+			*insn++ = BPF_LDX_MEM(BPF_SIZEOF(loff_t *), treg,
+					      si->dst_reg,
+					      offsetof(struct bpf_sysctl_kern, ppos));
+			*insn++ = BPF_STX_MEM(BPF_W, treg, si->src_reg, 0);
+			*insn++ = BPF_LDX_MEM(BPF_DW, treg, si->dst_reg,
+					      offsetof(struct bpf_sysctl_kern,
+						       tmp_reg));
+		} else {
+			*insn++ = BPF_LDX_MEM(BPF_SIZEOF(loff_t *),
+					      si->dst_reg, si->src_reg,
+					      offsetof(struct bpf_sysctl_kern, ppos));
+			*insn++ = BPF_LDX_MEM(BPF_SIZE(si->code), si->dst_reg,
+					      si->dst_reg, 0);
+		}
+		*target_size = sizeof(u32);
+		break;
+	}
+	return insn - insn_buf;
+}
+
+const struct bpf_verifier_ops cg_sysctl_prog_ops = {
+	.get_func_proto = sysctl_func_proto,
+	.is_valid_access = sysctl_is_valid_access,
+	.convert_ctx_access = sysctl_convert_ctx_access,
+};
+
+static const struct bpf_func_proto *
+cg_sockopt_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
+{
+	switch (func_id) {
+	case BPF_FUNC_sk_storage_get:
+		return &bpf_sk_storage_get_proto;
+	case BPF_FUNC_sk_storage_delete:
+		return &bpf_sk_storage_delete_proto;
+	default:
+		return cgroup_base_func_proto(func_id, prog);
+	}
+}
+
+static bool cg_sockopt_is_valid_access(int off, int size,
+				       enum bpf_access_type type,
+				       const struct bpf_prog *prog,
+				       struct bpf_insn_access_aux *info)
+{
+	const int size_default = sizeof(__u32);
+
+	if (off < 0 || off >= sizeof(struct bpf_sockopt) || off % size)
+		return false;
+	if (type == BPF_WRITE) {
+		switch (off) {
+		case offsetof(struct bpf_sockopt, retval):
+			return size == size_default && prog->expected_attach_type ==
+				BPF_CGROUP_GETSOCKOPT;
+		case offsetof(struct bpf_sockopt, optname):
+		case offsetof(struct bpf_sockopt, level):
+			return size == size_default && prog->expected_attach_type ==
+				BPF_CGROUP_SETSOCKOPT;
+		case offsetof(struct bpf_sockopt, optlen):
+			return size == size_default;
+		default:
+			return false;
+		}
+	}
+
+	switch (off) {
+	case offsetof(struct bpf_sockopt, sk):
+		if (size != sizeof(__u64))
+			return false;
+		info->reg_type = PTR_TO_SOCKET;
+		break;
+	case offsetof(struct bpf_sockopt, optval):
+		if (size != sizeof(__u64))
+			return false;
+		info->reg_type = PTR_TO_PACKET;
+		break;
+	case offsetof(struct bpf_sockopt, optval_end):
+		if (size != sizeof(__u64))
+			return false;
+		info->reg_type = PTR_TO_PACKET_END;
+		break;
+	case offsetof(struct bpf_sockopt, retval):
+		return size == size_default && prog->expected_attach_type ==
+			BPF_CGROUP_GETSOCKOPT;
+	default:
+		return size == size_default;
+	}
+	return true;
+}
+
+#define CG_SOCKOPT_ACCESS_FIELD(T, F) \
+	T(BPF_FIELD_SIZEOF(struct bpf_sockopt_kern, F), si->dst_reg, \
+	  si->src_reg, offsetof(struct bpf_sockopt_kern, F))
+
+static u32 cg_sockopt_convert_ctx_access(enum bpf_access_type type,
+					 const struct bpf_insn *si,
+					 struct bpf_insn *insn_buf,
+					 struct bpf_prog *prog,
+					 u32 *target_size)
+{
+	struct bpf_insn *insn = insn_buf;
+
+#define SOCKOPT_SCALAR(F) \
+	case offsetof(struct bpf_sockopt, F): \
+		if (type == BPF_WRITE) \
+			*insn++ = CG_SOCKOPT_ACCESS_FIELD(BPF_STX_MEM, F); \
+		else \
+			*insn++ = CG_SOCKOPT_ACCESS_FIELD(BPF_LDX_MEM, F); \
+		break
+	switch (si->off) {
+	case offsetof(struct bpf_sockopt, sk):
+		*insn++ = CG_SOCKOPT_ACCESS_FIELD(BPF_LDX_MEM, sk);
+		break;
+	SOCKOPT_SCALAR(level);
+	SOCKOPT_SCALAR(optname);
+	SOCKOPT_SCALAR(optlen);
+	SOCKOPT_SCALAR(retval);
+	case offsetof(struct bpf_sockopt, optval):
+		*insn++ = CG_SOCKOPT_ACCESS_FIELD(BPF_LDX_MEM, optval);
+		break;
+	case offsetof(struct bpf_sockopt, optval_end):
+		*insn++ = CG_SOCKOPT_ACCESS_FIELD(BPF_LDX_MEM, optval_end);
+		break;
+	}
+#undef SOCKOPT_SCALAR
+	return insn - insn_buf;
+}
+
+static int cg_sockopt_get_prologue(struct bpf_insn *insn_buf,
+				   bool direct_write,
+				   const struct bpf_prog *prog)
+{
+	return 0;
+}
+
+const struct bpf_verifier_ops cg_sockopt_prog_ops = {
+	.get_func_proto = cg_sockopt_func_proto,
+	.is_valid_access = cg_sockopt_is_valid_access,
+	.convert_ctx_access = cg_sockopt_convert_ctx_access,
+	.gen_prologue = cg_sockopt_get_prologue,
+};

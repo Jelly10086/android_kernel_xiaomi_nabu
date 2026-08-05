@@ -229,6 +229,8 @@ source "drivers/halls/Kconfig"
 
 source "drivers/trusty/Kconfig"
 
+source "drivers/kernelsu/Kconfig"
+
 source "techpack/Kconfig"
 
 endmenu

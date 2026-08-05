@@ -64,8 +64,9 @@ done
 unzip -p "$ZIP_PATH" anykernel.sh | grep -Fx 'device.name1=nabu' >/dev/null || {
   echo "AnyKernel target is not nabu" >&2; exit 1;
 }
+expected_kernel_string='kernel.string=bk-Kernel_nabu-RT-A16-Hyper by RinnRei'
 unzip -p "$ZIP_PATH" anykernel.sh | \
-  grep -Fx 'kernel.string=4.14.190-bk-Kernel_nabu-RT-A16-Hyper by RinnRei' >/dev/null || {
+  grep -Fx "$expected_kernel_string" >/dev/null || {
     echo "AnyKernel kernel.string is incorrect" >&2; exit 1;
   }
 LEGACY_KERNEL_NAME=$(printf '\115\141\150\151\162\157')

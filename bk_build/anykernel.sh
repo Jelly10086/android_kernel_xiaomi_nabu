@@ -1,7 +1,7 @@
 #!/sbin/sh
 # AnyKernel3 nabu installer.  The packer adds Image.gz, dtb and dtbo.img.
 properties() { '
-kernel.string=4.14.190-bk-Kernel_nabu-RT-A16-Hyper by RinnRei
+kernel.string=bk-Kernel_nabu-RT-A16-Hyper by RinnRei
 device.name1=nabu
 do.devicecheck=1
 do.modules=0

@@ -123,11 +123,17 @@ cp "$OUT_DIR/.config" "$OUT_DIR/nabu-a16.config"
 
 # Compile the integration-sensitive objects before the full image build.
 stage "编译" "对象"
+# KernelSU includes generated/compile.h and SELinux generated policy headers.
+# Build their normal owners first so a clean output directory cannot race the
+# parallel object-only invocation.
+make_kernel init/version.o
+make_kernel -j"$JOBS" security/selinux/
 make_kernel -j"$JOBS" \
   kernel/bpf/syscall.o kernel/bpf/verifier.o kernel/bpf/btf.o \
   kernel/bpf/arraymap.o kernel/bpf/hashtab.o kernel/bpf/ringbuf.o \
   kernel/bpf/xskmap_compat.o net/core/bpf_sk_storage.o \
   net/core/filter.o kernel/bpf/cgroup.o net/ipv4/udp.o net/ipv6/udp.o \
+  drivers/devfreq/bimc-bwmon.o \
   drivers/kernelsu/ksu.o \
   arch/arm64/net/bpf_jit_comp.o fs/pstore/ram.o fs/pstore/platform.o \
   kernel/printk/printk.o

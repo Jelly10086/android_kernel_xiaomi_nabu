@@ -29,6 +29,7 @@
 #include <linux/log2.h>
 #include <linux/sizes.h>
 #include <linux/clk.h>
+#include <linux/workqueue.h>
 #include <linux/msm-bus.h>
 #include <linux/msm-bus-board.h>
 #include "governor_bw_hwmon.h"
@@ -117,6 +118,7 @@ struct bwmon {
 	u32 thres_lim;
 	u32 byte_mask;
 	u32 byte_match;
+	struct work_struct update_work;
 };
 
 #define to_bwmon(ptr)		container_of(ptr, struct bwmon, hw)
@@ -763,11 +765,23 @@ static irqreturn_t bwmon_intr_handler3(int irq, void *dev)
 	return __bwmon_intr_handler(irq, dev, MON3);
 }
 
+static void bwmon_update_work(struct work_struct *work)
+{
+	struct bwmon *m = container_of(work, struct bwmon, update_work);
+
+	update_bw_hwmon(&m->hw);
+}
+
 static irqreturn_t bwmon_intr_thread(int irq, void *dev)
 {
 	struct bwmon *m = dev;
 
-	update_bw_hwmon(&m->hw);
+	/*
+	 * update_bw_hwmon() synchronously cancels delayed work.  Keep that
+	 * operation out of the RT IRQ thread so it cannot starve the task
+	 * which is publishing the work being canceled.
+	 */
+	queue_work(system_highpri_wq, &m->update_work);
 	return IRQ_HANDLED;
 }
 
@@ -930,6 +944,7 @@ void __stop_bw_hwmon(struct bw_hwmon *hw, enum mon_reg_type type)
 
 	mon_irq_disable(m, type);
 	free_irq(m->irq, m);
+	cancel_work_sync(&m->update_work);
 	mon_disable(m, type);
 	mon_clear(m, true, type);
 	mon_irq_clear(m, type);
@@ -961,6 +976,7 @@ int __suspend_bw_hwmon(struct bw_hwmon *hw, enum mon_reg_type type)
 
 	mon_irq_disable(m, type);
 	free_irq(m->irq, m);
+	cancel_work_sync(&m->update_work);
 	mon_disable(m, type);
 	mon_irq_clear(m, type);
 	ret = mon_setup_disable(m);
@@ -1264,6 +1280,7 @@ static int bimc_bwmon_driver_probe(struct platform_device *pdev)
 			     &m->byte_match);
 	of_property_read_u32(dev->of_node, "qcom,byte-mid-mask",
 			     &m->byte_mask);
+	INIT_WORK(&m->update_work, bwmon_update_work);
 
 	if (m->spec->throt_adj) {
 		m->hw.set_throttle_adj = mon_set_throttle_adj;

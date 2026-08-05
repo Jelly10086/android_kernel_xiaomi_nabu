@@ -1,14 +1,14 @@
 #!/sbin/sh
 # AnyKernel3 nabu installer.  The packer adds Image.gz, dtb and dtbo.img.
-properties() { '
-kernel.string=bk-Kernel_nabu-RT-A16-Hyper by RinnRei
+properties() { "
+kernel.string=bk's kernel
 device.name1=nabu
 do.devicecheck=1
 do.modules=0
 do.systemless=1
 do.cleanup=1
 do.cleanuponabort=0
-'; }
+"; }
 
 block=boot;
 is_slot_device=1;

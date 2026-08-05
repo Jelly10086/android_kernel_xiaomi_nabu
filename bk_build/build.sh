@@ -192,7 +192,7 @@ python3 "$KERNEL_DIR/scripts/dtc/libfdt/mkdtboimg.py" \
   echo "vmlinux has no .BTF section" >&2; exit 1;
 }
 kernel_release=$(make_kernel -s kernelrelease)
-[ "$kernel_release" = "4.14.190-bk-Kernel_nabu-RT-A16-Hyper" ] || {
+[ "$kernel_release" = "4.14.190_bk-Kernel_RT-16.2" ] || {
   echo "unexpected kernel release: $kernel_release" >&2; exit 1;
 }
 
@@ -242,6 +242,6 @@ cp "$OUT_DIR/nabu-a16.config" "$OUT_DIR/artifacts/nabu-a16.config"
 stage "打包" "生成 AnyKernel"
 package_path=$(KERNEL_DIR="$KERNEL_DIR" OUT_DIR="$OUT_DIR" "$SCRIPT_DIR/pack.sh")
 package_sha=$(sha256sum "$package_path" | awk '{print $1}')
-stage "Down" "构建打包Pass"
+stage "Done" "构建打包Pass"
 printf '内核版本：%s\n产物目录：%s/artifacts\n包体：%s\nSHA256：%s\n' \
   "$kernel_release" "$OUT_DIR" "$package_path" "$package_sha"

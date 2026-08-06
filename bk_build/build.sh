@@ -155,7 +155,7 @@ make_kernel -j"$JOBS" \
   kernel/fork.o kernel/sched/core.o kernel/sched/fair.o \
   kernel/cgroup/cgroup.o kernel/cgroup/pids.o security/device_cgroup.o \
   kernel/pid_namespace.o kernel/user_namespace.o ipc/namespace.o \
-  drivers/net/veth.o fs/overlayfs/overlay.o \
+  drivers/net/veth.o fs/overlayfs/ \
   drivers/block/zram/zram_drv.o mm/zsmalloc.o \
   drivers/clk/qcom/clk-cpu-osm.o \
   kernel/events/core.o kernel/trace/trace.o kernel/trace/trace_events.o \

@@ -832,27 +832,21 @@ out:
  * link together 3 PAGE_SIZE sized pages to form a zspage
  * since then we can perfectly fit in 8 such objects.
  */
-static int get_pages_per_zspage(int class_size)
+static int calculate_zspage_chain_size(int class_size)
 {
-	int i, max_usedpc = 0;
-	/* zspage order which gives maximum used size per KB */
-	int max_usedpc_order = 1;
+	int i, min_waste = INT_MAX;
+	int chain_size = 1;
 
 	for (i = 1; i <= ZS_MAX_PAGES_PER_ZSPAGE; i++) {
-		int zspage_size;
-		int waste, usedpc;
+		int waste = (i * PAGE_SIZE) % class_size;
 
-		zspage_size = i * PAGE_SIZE;
-		waste = zspage_size % class_size;
-		usedpc = (zspage_size - waste) * 100 / zspage_size;
-
-		if (usedpc > max_usedpc) {
-			max_usedpc = usedpc;
-			max_usedpc_order = i;
+		if (waste < min_waste) {
+			min_waste = waste;
+			chain_size = i;
 		}
 	}
 
-	return max_usedpc_order;
+	return chain_size;
 }
 
 static struct zspage *get_zspage(struct page *page)
@@ -2354,7 +2348,7 @@ struct zs_pool *zs_create_pool(const char *name)
 		size = ZS_MIN_ALLOC_SIZE + i * ZS_SIZE_CLASS_DELTA;
 		if (size > ZS_MAX_ALLOC_SIZE)
 			size = ZS_MAX_ALLOC_SIZE;
-		pages_per_zspage = get_pages_per_zspage(size);
+		pages_per_zspage = calculate_zspage_chain_size(size);
 		objs_per_zspage = pages_per_zspage * PAGE_SIZE / size;
 
 		/*

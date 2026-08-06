@@ -1519,9 +1519,14 @@ compress_again:
 		entry = zram_entry_alloc(zram, comp_len,
 				GFP_NOIO | __GFP_HIGHMEM |
 				__GFP_MOVABLE | __GFP_CMA);
-		if (entry)
+		if (!entry)
+			return -ENOMEM;
+
+		if (comp_len != PAGE_SIZE)
 			goto compress_again;
-		return -ENOMEM;
+
+		/* Keep the per-CPU stream pinned for the common completion path. */
+		zstrm = zcomp_stream_get(zram->comp);
 	}
 
 	alloced_pages = zs_get_total_pages(zram->mem_pool);

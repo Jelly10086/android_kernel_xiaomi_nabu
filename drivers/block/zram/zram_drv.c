@@ -504,8 +504,15 @@ static ssize_t backing_dev_store(struct device *dev,
 		return -ENOMEM;
 
 	down_write(&zram->init_lock);
-	if (init_done(zram)) {
-		pr_info("Can't setup backing device for initialized device\n");
+	/*
+	 * Android may initialize and enable zram before encrypted /data is ready
+	 * for its per-boot loop backing file.  Attaching the first backing device
+	 * later is safe: init_lock excludes I/O while the independent backing
+	 * bitmap and block device are installed.  Never replace a backing device
+	 * after the zram device is live.
+	 */
+	if (init_done(zram) && zram->backing_dev) {
+		pr_info("Can't replace backing device for initialized device\n");
 		err = -EBUSY;
 		goto out;
 	}

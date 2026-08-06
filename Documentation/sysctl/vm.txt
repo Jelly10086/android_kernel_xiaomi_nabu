@@ -811,13 +811,15 @@ with no ill effects: errors and warnings on these stats are suppressed.)
 
 swappiness
 
-This control is used to define how aggressive the kernel will swap
-memory pages.  Higher values will increase agressiveness, lower values
-decrease the amount of swap.  A value of 0 instructs the kernel not to
-initiate swap until the amount of free and file-backed pages is less
-than the high water mark in a zone.
+This control defines the relative I/O cost of swapping and filesystem
+paging, as a value between 0 and 200.  At 100, the VM assumes equal I/O
+cost.  Values above 100 are useful when in-memory swap such as zram is
+faster than filesystem I/O.
 
 The default value is 60.
+
+A value of 0 instructs the kernel not to initiate swap until the amount
+of free and file-backed pages is less than the high water mark in a zone.
 
 ==============================================================
 

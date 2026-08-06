@@ -3292,6 +3292,31 @@ static int adjust_scalar_min_max_vals(struct bpf_verifier_env *env,
 		/* We may learn something more from the var_off */
 		__update_reg_bounds(dst_reg);
 		break;
+	case BPF_ARSH:
+		if (umax_val >= insn_bitness) {
+			/* Shifts greater than 31 or 63 are undefined. */
+			mark_reg_unknown(regs, insn->dst_reg);
+			break;
+		}
+
+		/* src_known is true here, so umin_val equals umax_val. */
+		if (insn_bitness == 32) {
+			dst_reg->smin_value =
+				(u32)(((s32)dst_reg->smin_value) >> umin_val);
+			dst_reg->smax_value =
+				(u32)(((s32)dst_reg->smax_value) >> umin_val);
+		} else {
+			dst_reg->smin_value >>= umin_val;
+			dst_reg->smax_value >>= umin_val;
+		}
+		dst_reg->var_off = tnum_arshift(dst_reg->var_off, umin_val,
+						 insn_bitness);
+
+		/* Let signed bounds and var_off refine the unsigned range. */
+		dst_reg->umin_value = 0;
+		dst_reg->umax_value = U64_MAX;
+		__update_reg_bounds(dst_reg);
+		break;
 	default:
 		mark_reg_unknown(regs, insn->dst_reg);
 		break;

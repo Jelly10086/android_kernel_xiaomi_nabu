@@ -549,7 +549,7 @@ static int map_check_btf(struct bpf_map *map, const struct btf *btf,
 	return ret;
 }
 
-#define BPF_MAP_CREATE_LAST_FIELD btf_value_type_id
+#define BPF_MAP_CREATE_LAST_FIELD btf_vmlinux_value_type_id
 /* called via syscall */
 static int map_create(union bpf_attr *attr)
 {
@@ -560,6 +560,9 @@ static int map_create(union bpf_attr *attr)
 
 	err = CHECK_ATTR(BPF_MAP_CREATE);
 	if (err)
+		return -EINVAL;
+	/* This kernel has no BPF hardware offload or struct_ops support. */
+	if (attr->map_ifindex || attr->btf_vmlinux_value_type_id)
 		return -EINVAL;
 	if (attr->btf_key_type_id && !attr->btf_value_type_id)
 		return -EINVAL;
@@ -2151,7 +2154,7 @@ static int bpf_prog_detach(const union bpf_attr *attr)
 	return ret;
 }
 
-#define BPF_PROG_QUERY_LAST_FIELD query.prog_cnt
+#define BPF_PROG_QUERY_LAST_FIELD query.prog_attach_flags
 
 static int bpf_prog_query(const union bpf_attr *attr,
 			  union bpf_attr __user *uattr)
@@ -2343,6 +2346,16 @@ static int bpf_prog_get_info_by_fd(struct bpf_prog *prog,
 	info.load_time = prog->aux->load_time;
 	info.created_by_uid = from_kuid_munged(current_user_ns(),
 					       prog->aux->user->uid);
+	info.ifindex = 0;
+	info.gpl_compatible = prog->gpl_compatible;
+	info.netns_dev = 0;
+	info.netns_ino = 0;
+	info.nr_jited_ksyms = 0;
+	info.nr_jited_func_lens = 0;
+	info.nr_prog_tags = 0;
+	info.run_time_ns = 0;
+	info.run_cnt = 0;
+	info.recursion_misses = 0;
 
 	memcpy(info.tag, prog->tag, sizeof(prog->tag));
 	memcpy(info.name, prog->aux->name, sizeof(prog->aux->name));
@@ -2365,14 +2378,14 @@ static int bpf_prog_get_info_by_fd(struct bpf_prog *prog,
 			.insn_off = 0,
 			.type_id = prog->aux->type_id,
 		};
-		u32 ucnt = info.func_info_cnt;
+		u32 ucnt = info.nr_func_info;
 		u32 urec_size = info.func_info_rec_size;
 
 		if (prog->aux->btf)
 			info.btf_id = btf_id(prog->aux->btf);
-		info.func_info_cnt = prog->aux->func_info_cnt;
+		info.nr_func_info = prog->aux->func_info_cnt;
 		info.func_info_rec_size = sizeof(finfo);
-		if (ucnt && info.func_info_cnt) {
+		if (ucnt && info.nr_func_info) {
 			if (urec_size < sizeof(finfo))
 				return -EINVAL;
 			if (copy_to_user(u64_to_user_ptr(info.func_info), &finfo,
@@ -2382,13 +2395,13 @@ static int bpf_prog_get_info_by_fd(struct bpf_prog *prog,
 	}
 
 	{
-		u32 ucnt = info.line_info_cnt;
+		u32 ucnt = info.nr_line_info;
 		u32 urec_size = info.line_info_rec_size;
 
-		info.line_info_cnt = prog->aux->nr_linfo;
+		info.nr_line_info = prog->aux->nr_linfo;
 		info.line_info_rec_size = sizeof(struct bpf_line_info);
-		if (ucnt && info.line_info_cnt) {
-			ucnt = min_t(u32, ucnt, info.line_info_cnt);
+		if (ucnt && info.nr_line_info) {
+			ucnt = min_t(u32, ucnt, info.nr_line_info);
 			if (urec_size < sizeof(struct bpf_line_info))
 				return -EINVAL;
 			if (copy_to_user(u64_to_user_ptr(info.line_info),
@@ -2396,7 +2409,7 @@ static int bpf_prog_get_info_by_fd(struct bpf_prog *prog,
 					 ucnt * sizeof(struct bpf_line_info)))
 				return -EFAULT;
 		}
-		info.jited_line_info_cnt = 0;
+		info.nr_jited_line_info = 0;
 		info.jited_line_info_rec_size = sizeof(__u64);
 	}
 
@@ -2454,6 +2467,10 @@ static int bpf_map_get_info_by_fd(struct bpf_map *map,
 	info.max_entries = map->max_entries;
 	info.map_flags = map->map_flags;
 	memcpy(info.name, map->name, sizeof(map->name));
+	info.ifindex = 0;
+	info.btf_vmlinux_value_type_id = 0;
+	info.netns_dev = 0;
+	info.netns_ino = 0;
 	if (map->btf) {
 		info.btf_id = btf_id(map->btf);
 		info.btf_key_type_id = map->btf_key_type_id;
@@ -2612,102 +2629,27 @@ out:
 	return err;
 }
 
-#define BPF_LOADER_DIAG_LOG_SIZE 768
-
-static void bpf_loader_diag_user_log(__u64 log_buf, __u32 log_size)
-{
-	const char __user *user_log = u64_to_user_ptr(log_buf);
-	char buf[BPF_LOADER_DIAG_LOG_SIZE];
-	size_t scan_size, copy_size, offset;
-	long len;
-
-	if (!log_buf || !log_size)
-		return;
-
-	scan_size = min_t(size_t, log_size, SZ_1M);
-	len = strnlen_user(user_log, scan_size);
-	if (len <= 1)
-		return;
-	if (len > scan_size)
-		len = scan_size + 1;
-
-	copy_size = min_t(size_t, len - 1, sizeof(buf) - 1);
-	offset = len - 1 - copy_size;
-	if (copy_from_user(buf, user_log + offset, copy_size))
-		return;
-	buf[copy_size] = '\0';
-	pr_err("BPF_LOADER_DIAG: log tail:\n%s\n", buf);
-}
-
-static void bpf_loader_diag_error(int cmd, unsigned int size, int err,
-				  const union bpf_attr *attr)
-{
-	if (err >= 0 || !bpf_android_loader_task())
-		return;
-
-	pr_err("BPF_LOADER_DIAG: comm=%s pid=%d cmd=%d size=%u err=%d\n",
-	       current->comm, current->pid, cmd, size, err);
-	if (!attr)
-		return;
-
-	switch (cmd) {
-	case BPF_MAP_CREATE:
-		pr_err("BPF_LOADER_DIAG: map type=%u key=%u value=%u max=%u flags=0x%x name=%.*s btf_fd=%u key_btf=%u value_btf=%u\n",
-		       attr->map_type, attr->key_size, attr->value_size,
-		       attr->max_entries, attr->map_flags, BPF_OBJ_NAME_LEN,
-		       attr->map_name, attr->btf_fd, attr->btf_key_type_id,
-		       attr->btf_value_type_id);
-		break;
-	case BPF_PROG_LOAD:
-		pr_err("BPF_LOADER_DIAG: prog type=%u attach=%u insns=%u flags=0x%x name=%.*s kern_version=0x%x btf_fd=%u func_info=%u line_info=%u log_level=%u\n",
-		       attr->prog_type, attr->expected_attach_type, attr->insn_cnt,
-		       attr->prog_flags, BPF_OBJ_NAME_LEN, attr->prog_name,
-		       attr->kern_version, attr->prog_btf_fd, attr->func_info_cnt,
-		       attr->line_info_cnt, attr->log_level);
-		bpf_loader_diag_user_log(attr->log_buf, attr->log_size);
-		break;
-	case BPF_BTF_LOAD:
-		pr_err("BPF_LOADER_DIAG: btf size=%u log_level=%u log_size=%u\n",
-		       attr->btf_size, attr->btf_log_level, attr->btf_log_size);
-		bpf_loader_diag_user_log(attr->btf_log_buf,
-				 attr->btf_log_size);
-		break;
-	default:
-		break;
-	}
-}
-
 SYSCALL_DEFINE3(bpf, int, cmd, union bpf_attr __user *, uattr, unsigned int, size)
 {
 	union bpf_attr attr;
 	int err;
 
-	if (sysctl_unprivileged_bpf_disabled && !capable(CAP_SYS_ADMIN)) {
-		err = -EPERM;
-		bpf_loader_diag_error(cmd, size, err, NULL);
-		return err;
-	}
+	if (sysctl_unprivileged_bpf_disabled && !capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	err = check_uarg_tail_zero(uattr, sizeof(attr), size);
-	if (err) {
-		bpf_loader_diag_error(cmd, size, err, NULL);
+	if (err)
 		return err;
-	}
 	size = min_t(u32, size, sizeof(attr));
 
 	/* copy attributes from user space, may be less than sizeof(bpf_attr) */
 	memset(&attr, 0, sizeof(attr));
-	if (copy_from_user(&attr, uattr, size) != 0) {
-		err = -EFAULT;
-		bpf_loader_diag_error(cmd, size, err, NULL);
-		return err;
-	}
+	if (copy_from_user(&attr, uattr, size) != 0)
+		return -EFAULT;
 
 	err = security_bpf(cmd, &attr, size);
-	if (err < 0) {
-		bpf_loader_diag_error(cmd, size, err, &attr);
+	if (err < 0)
 		return err;
-	}
 
 	switch (cmd) {
 	case BPF_MAP_CREATE:
@@ -2792,6 +2734,5 @@ SYSCALL_DEFINE3(bpf, int, cmd, union bpf_attr __user *, uattr, unsigned int, siz
 		break;
 	}
 
-	bpf_loader_diag_error(cmd, size, err, &attr);
 	return err;
 }

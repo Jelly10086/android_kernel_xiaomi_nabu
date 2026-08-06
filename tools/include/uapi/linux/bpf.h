@@ -278,9 +278,11 @@ union bpf_attr {
 					 * BPF_F_NUMA_NODE is set).
 					 */
 		char	map_name[BPF_OBJ_NAME_LEN];
-		__u32	btf_fd;		/* fd pointing to a BTF object */
-		__u32	btf_key_type_id;
-		__u32	btf_value_type_id;
+		__u32	map_ifindex;	/* ifindex of netdev to create on */
+		__u32	btf_fd;		/* fd pointing to a BTF type data */
+		__u32	btf_key_type_id;	/* BTF type_id of the key */
+		__u32	btf_value_type_id;	/* BTF type_id of the value */
+		__u32	btf_vmlinux_value_type_id;
 	};
 
 	struct { /* anonymous struct used by BPF_MAP_*_ELEM commands */
@@ -378,6 +380,9 @@ union bpf_attr {
 		__u32		attach_flags;
 		__aligned_u64	prog_ids;
 		__u32		prog_cnt;
+		__u32		:32;
+		/* output: per-program attach flags; invalid for effective query */
+		__aligned_u64	prog_attach_flags;
 	} query;
 
 	struct { /* anonymous struct used by BPF_RAW_TRACEPOINT_OPEN */
@@ -1138,16 +1143,30 @@ struct bpf_prog_info {
 	__u32 nr_map_ids;
 	__aligned_u64 map_ids;
 	char name[BPF_OBJ_NAME_LEN];
+	__u32 ifindex;
+	__u32 gpl_compatible:1;
+	__u32 :31; /* alignment pad */
+	__u64 netns_dev;
+	__u64 netns_ino;
+	__u32 nr_jited_ksyms;
+	__u32 nr_jited_func_lens;
+	__aligned_u64 jited_ksyms;
+	__aligned_u64 jited_func_lens;
 	__u32 btf_id;
 	__u32 func_info_rec_size;
 	__aligned_u64 func_info;
-	__u32 func_info_cnt;
-	__u32 line_info_cnt;
+	__u32 nr_func_info;
+	__u32 nr_line_info;
 	__aligned_u64 line_info;
 	__aligned_u64 jited_line_info;
-	__u32 jited_line_info_cnt;
+	__u32 nr_jited_line_info;
 	__u32 line_info_rec_size;
 	__u32 jited_line_info_rec_size;
+	__u32 nr_prog_tags;
+	__aligned_u64 prog_tags;
+	__u64 run_time_ns;
+	__u64 run_cnt;
+	__u64 recursion_misses;
 } __attribute__((aligned(8)));
 
 struct bpf_map_info {
@@ -1158,6 +1177,10 @@ struct bpf_map_info {
 	__u32 max_entries;
 	__u32 map_flags;
 	char  name[BPF_OBJ_NAME_LEN];
+	__u32 ifindex;
+	__u32 btf_vmlinux_value_type_id;
+	__u64 netns_dev;
+	__u64 netns_ino;
 	__u32 btf_id;
 	__u32 btf_key_type_id;
 	__u32 btf_value_type_id;
@@ -1167,6 +1190,9 @@ struct bpf_btf_info {
 	__aligned_u64 btf;
 	__u32 btf_size;
 	__u32 id;
+	__aligned_u64 name;
+	__u32 name_len;
+	__u32 kernel_btf;
 } __attribute__((aligned(8)));
 
 /* User bpf_sock_addr struct to access socket fields and sockaddr struct passed

@@ -43,6 +43,17 @@ struct tnum tnum_rshift(struct tnum a, u8 shift)
 	return TNUM(a.value >> shift, a.mask >> shift);
 }
 
+struct tnum tnum_arshift(struct tnum a, u8 min_shift, u8 insn_bitness)
+{
+	/* Preserve the sign bit belonging to the actual ALU width. */
+	if (insn_bitness == 32)
+		return TNUM((u32)(((s32)a.value) >> min_shift),
+			    (u32)(((s32)a.mask) >> min_shift));
+
+	return TNUM((s64)a.value >> min_shift,
+		    (s64)a.mask >> min_shift);
+}
+
 struct tnum tnum_add(struct tnum a, struct tnum b)
 {
 	u64 sm, sv, sigma, chi, mu;

@@ -143,6 +143,13 @@ struct btf_param {
 enum {
 	BTF_VAR_STATIC = 0,
 	BTF_VAR_GLOBAL_ALLOCATED,
+	BTF_VAR_GLOBAL_EXTERN,
+};
+
+enum btf_func_linkage {
+	BTF_FUNC_STATIC = 0,
+	BTF_FUNC_GLOBAL,
+	BTF_FUNC_EXTERN,
 };
 
 /* BTF_KIND_VAR is followed by a single "struct btf_var" to describe

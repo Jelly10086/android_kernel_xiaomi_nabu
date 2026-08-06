@@ -1212,7 +1212,10 @@ SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
 	memcpy(&tmp, utsname(), sizeof(tmp));
 	if (!strncmp(current->comm, "bpfloader", 9) ||
 	    !strncmp(current->comm, "netbpfload", 10) ||
-	    !strncmp(current->comm, "netd", 4)) {
+	    !strncmp(current->comm, "netd", 4) ||
+	    !strcmp(current->comm, "lmkd") ||
+	    !strcmp(current->comm, "system_server")) {
+		/* Android 16 libmemevents gates BPF ringbuf on uname >= 5.8. */
 		strcpy(tmp.release, "5.10.199");
 		pr_debug("fake uname: %s/%d release=%s\n",
 			 current->comm, current->pid, tmp.release);

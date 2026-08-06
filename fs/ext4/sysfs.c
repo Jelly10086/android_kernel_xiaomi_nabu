@@ -434,14 +434,13 @@ int ext4_register_sysfs(struct super_block *sb)
 void ext4_unregister_sysfs(struct super_block *sb)
 {
 	struct ext4_sb_info *sbi = EXT4_SB(sb);
-	const struct ext4_proc_files *p;
 
 	if (sbi->s_proc) {
-		for (p = proc_files; p->name; p++)
-			remove_proc_entry(p->name, sbi->s_proc);
-		remove_proc_entry(sb->s_id, ext4_proc_root);
+		remove_proc_subtree(sb->s_id, ext4_proc_root);
+		sbi->s_proc = NULL;
 	}
-	kobject_del(&sbi->s_kobj);
+	if (sbi->s_kobj.state_in_sysfs)
+		kobject_del(&sbi->s_kobj);
 }
 
 int __init ext4_init_sysfs(void)
@@ -470,4 +469,3 @@ void ext4_exit_sysfs(void)
 	remove_proc_entry(proc_dirname, NULL);
 	ext4_proc_root = NULL;
 }
-

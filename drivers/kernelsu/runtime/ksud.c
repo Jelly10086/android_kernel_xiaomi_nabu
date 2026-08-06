@@ -54,21 +54,29 @@ extern void ext4_unregister_sysfs(struct super_block *sb);
 int nuke_ext4_sysfs(const char *mnt)
 {
     struct path path;
+    struct super_block *sb;
     int err = kern_path(mnt, 0, &path);
     if (err) {
         pr_err("nuke path err: %d\n", err);
         return err;
     }
 
-    struct super_block *sb = path.dentry->d_inode->i_sb;
-    const char *name = sb->s_type->name;
-    if (strcmp(name, "ext4") != 0) {
+    if (!path.dentry->d_inode || !path.dentry->d_inode->i_sb ||
+        !path.dentry->d_inode->i_sb->s_type) {
+        path_put(&path);
+        return -EINVAL;
+    }
+
+    sb = path.dentry->d_inode->i_sb;
+    if (strcmp(sb->s_type->name, "ext4") != 0) {
         pr_info("nuke but module aren't mounted\n");
         path_put(&path);
         return -EINVAL;
     }
 
+    down_write(&sb->s_umount);
     ext4_unregister_sysfs(sb);
+    up_write(&sb->s_umount);
     path_put(&path);
     return 0;
 }

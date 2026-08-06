@@ -277,7 +277,7 @@ include scripts/Kbuild.include
 # Read KERNELRELEASE from include/config/kernel.release (if it exists)
 KERNELRELEASE = $(shell cat include/config/kernel.release 2> /dev/null)
 KERNELVERSION = $(VERSION)$(if $(PATCHLEVEL),.$(PATCHLEVEL)$(if $(SUBLEVEL),.$(SUBLEVEL)))$(EXTRAVERSION)
-NABU_KERNEL_RELEASE = $(VERSION).$(PATCHLEVEL).$(SUBLEVEL)_bk-Kernel_RT-16.2_r1
+NABU_KERNEL_RELEASE = $(VERSION).$(PATCHLEVEL).$(SUBLEVEL)_bk-Kernel_16.2-R2
 export VERSION PATCHLEVEL SUBLEVEL KERNELRELEASE KERNELVERSION
 
 # SUBARCH tells the usermode build what the underlying arch is.  That is set

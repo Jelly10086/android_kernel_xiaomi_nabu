@@ -25,3 +25,26 @@ The packaged `dtb` follows the HyperOS vendor_boot order: `sm8150.dtb`,
 `nabu` and handles boot and vendor_boot separately. Restore the boot image
 matching the installed system before installing from a flashed PBRP image;
 the installer rejects a boot image carrying `twrpfastboot=1`.
+
+The package embeds the fixed PBRP 4.0 recovery ramdisk from
+`PBRP-nabu-4.0-20241222-2341-UNOFFICIAL.zip`. It installs that ramdisk only to
+the active boot slot. It removes a hard-coded `androidboot.force_normal_boot`
+value and leaves normal/recovery selection to the nabu bootloader, matching the
+stock HyperOS boot header. The source ZIP and ramdisk hashes are recorded in
+`bk_build/recovery/README.md` and in every build's `build-info.txt`.
+
+The installer also places `bk-reburnout.sh` in KernelSU `service.d`. It applies
+the nabu cpuset layout and swappiness 180, pins SystemUI, MIUI Home, and the
+display composer to CPUs 4-7, and enables `Re.burnout-mode` only after a
+sustained CPU/GPU load. The mode raises CPU, GPU, UFS, DDR, LLCC, and GPU-bus
+performance requests, exits on sustained low load or 80 C, and restores every
+saved sysfs value. Create `/data/adb/bk-kernel/Re.burnout-mode.disabled` to
+disable the dynamic mode; write `1`, `0`, or `auto` to
+`Re.burnout-mode.force` for validation.
+
+The installer also configures a 1 GiB zram backing loop from Android's
+`/data/per_boot` area. HyperOS can initialize zram before that encrypted path
+and a free loop node are ready, so the kernel permits only the first missing
+backing device to be attached later without resetting active swap. Direct I/O
+and a 512 MiB per-boot writeback budget limit flash wear. Idle pages are marked
+and written back only after the display has remained off for one hour.

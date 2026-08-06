@@ -192,7 +192,7 @@ jobs:
           fi
           notes="${RUNNER_TEMP}/release-notes.md"
           {
-            echo "Kernel: 4.14.190_bk-Kernel_RT-16.2_r1"
+            echo "Kernel: 4.14.190_bk-Kernel_16.2-R2"
             echo "Target: Xiaomi Pad 5 (nabu)"
             echo "Build: GitHub Actions run ${GITHUB_RUN_NUMBER}"
             echo "Commit: ${GITHUB_SHA}"

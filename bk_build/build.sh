@@ -99,9 +99,9 @@ for symbol in MACH_XIAOMI_NABU BPF BPF_SYSCALL BPF_JIT BPF_JIT_ALWAYS_ON \
   NF_NAT_REDIRECT NF_TABLES IP_NF_IPTABLES IP_NF_FILTER IP_NF_NAT \
   IP_NF_TARGET_MASQUERADE NETFILTER_XT_TARGET_TCPMSS \
   NETFILTER_XT_MATCH_ADDRTYPE IP_ADVANCED_ROUTER IP_MULTIPLE_TABLES \
-  PREEMPT_RT_FULL CPU_FREQ_GOV_SCHEDUTIL \
+  PREEMPT__LL PREEMPT CPU_FREQ_GOV_SCHEDUTIL \
   CC_OPTIMIZE_FOR_SIZE DEBUG_INFO \
-  LRU_GEN \
+  LRU_GEN ZRAM ZRAM_WRITEBACK \
   DEBUG_INFO_DWARF4 DEBUG_INFO_BTF DEBUG_FS KALLSYMS FRAME_POINTER \
   PRINTK_TIME PSTORE \
   PSTORE_ZLIB_COMPRESS PSTORE_CONSOLE PSTORE_PMSG PSTORE_RAM MAGIC_SYSRQ \
@@ -111,7 +111,8 @@ for symbol in MACH_XIAOMI_NABU BPF BPF_SYSCALL BPF_JIT BPF_JIT_ALWAYS_ON \
   }
 done
 for symbol in DEBUG_INFO_REDUCED DEBUG_INFO_SPLIT DEBUG_KERNEL DYNAMIC_DEBUG \
-  KALLSYMS_ALL CC_OPTIMIZE_FOR_PERFORMANCE SCHED_WALT IRQ_TIME_ACCOUNTING; do
+  KALLSYMS_ALL CC_OPTIMIZE_FOR_PERFORMANCE SCHED_WALT IRQ_TIME_ACCOUNTING \
+  PREEMPT_RT_FULL PREEMPT_RTB PREEMPT_RT_BASE RCU_BOOST; do
   if grep -q "^CONFIG_$symbol=" "$OUT_DIR/.config"; then
     echo "required config is not disabled: CONFIG_$symbol" >&2; exit 1
   fi
@@ -206,9 +207,23 @@ python3 "$KERNEL_DIR/scripts/dtc/libfdt/mkdtboimg.py" \
   echo "vmlinux has no .BTF section" >&2; exit 1;
 }
 kernel_release=$(make_kernel -s kernelrelease)
-[ "$kernel_release" = "4.14.190_bk-Kernel_RT-16.2_r1" ] || {
+[ "$kernel_release" = "4.14.190_bk-Kernel_16.2-R2" ] || {
   echo "unexpected kernel release: $kernel_release" >&2; exit 1;
 }
+
+stage "生成" "ZRAM 回写助手"
+"$CLANG_DIR/bin/clang" --target=aarch64-linux-android \
+  -Oz -ffreestanding -fno-builtin -fno-stack-protector \
+  -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-pie \
+  -nostdlib -static -fuse-ld=lld -Wl,-e,_start -Wl,--build-id=none \
+  -Wl,-z,max-page-size=4096 \
+  "$SCRIPT_DIR/tools/bk-zram-setup.c" \
+  -o "$OUT_DIR/artifacts/bk-zram-setup"
+"$CLANG_DIR/bin/llvm-objdump" -f "$OUT_DIR/artifacts/bk-zram-setup" | \
+  grep -F 'architecture: aarch64' >/dev/null || {
+    echo "invalid zram helper architecture" >&2; exit 1;
+  }
+chmod 0755 "$OUT_DIR/artifacts/bk-zram-setup"
 
 dirty_diff_sha=$(git -C "$KERNEL_DIR" diff --binary HEAD -- | sha256sum | awk '{print $1}')
 ksu_tree_sha=$(
@@ -219,7 +234,7 @@ anykernel_template_sha=$(
   cd "$SCRIPT_DIR"
   {
     sha256sum anykernel.sh
-    find anykernel -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+    find anykernel recovery -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
   } | sha256sum | awk '{print $1}'
 )
 git -C "$KERNEL_DIR" ls-files --others --exclude-standard > \
@@ -237,6 +252,10 @@ git -C "$KERNEL_DIR" ls-files --others --exclude-standard > \
   echo "DROIDSPACES_COMMIT=7412f6fb732fe7f5e3dc6ac0848d82ef9ff98acf"
   echo "KERNELSU_TREE_SHA256=$ksu_tree_sha"
   echo "ANYKERNEL_TEMPLATE_SHA256=$anykernel_template_sha"
+  echo "PBRP_SOURCE_ZIP_SHA256=77a06f1bfdcd0d4e47c89d83f95a1b650217c067085808e361510461d9608203"
+  echo "PBRP_RAMDISK_SHA256=15ae763c1f5b93ae48bcd007ff1f66871873aaee5b3a32852acbbf75b897fc54"
+  echo "PBRP_RAMDISK_GZIP_SHA256=248feef8879116c86df1729ecf9595b4be50834dd5bd66fe5732953cafaa4602"
+  echo "ZRAM_SETUP_SHA256=$(sha256sum "$OUT_DIR/artifacts/bk-zram-setup" | awk '{print $1}')"
   echo "CLANG=$CLANG_DIR/bin/clang"
   "$CLANG_DIR/bin/clang" --version | head -1
   if [ -n "$CCACHE" ]; then
@@ -252,7 +271,7 @@ git -C "$KERNEL_DIR" ls-files --others --exclude-standard > \
 cp "$OUT_DIR/nabu-a16.config" "$OUT_DIR/artifacts/nabu-a16.config"
 (cd "$OUT_DIR/artifacts" && \
   sha256sum Image.gz dtb dtbo.img dtbo-dump.txt build-info.txt \
-    nabu-a16.config untracked-sources.txt) > \
+    nabu-a16.config untracked-sources.txt bk-zram-setup) > \
   "$OUT_DIR/artifacts/SHA256SUMS"
 stage "打包" "生成 AnyKernel"
 package_path=$(KERNEL_DIR="$KERNEL_DIR" OUT_DIR="$OUT_DIR" "$SCRIPT_DIR/pack.sh")

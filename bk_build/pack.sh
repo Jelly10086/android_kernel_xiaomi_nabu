@@ -64,10 +64,14 @@ done
 unzip -p "$ZIP_PATH" anykernel.sh | grep -Fx 'device.name1=nabu' >/dev/null || {
   echo "AnyKernel target is not nabu" >&2; exit 1;
 }
-expected_kernel_string="kernel.string=bk's kernel"
+expected_kernel_string="kernel.string=RinnRei's bk-Kernel / CoolApk @零音Rei"
 unzip -p "$ZIP_PATH" anykernel.sh | \
   grep -Fx "$expected_kernel_string" >/dev/null || {
     echo "AnyKernel kernel.string is incorrect" >&2; exit 1;
+  }
+unzip -p "$ZIP_PATH" anykernel.sh | \
+  grep -Fx '  patch_prop "$ramdisk/prop.default" ro.mi.os.custfeatureresolve true;' >/dev/null || {
+    echo "HyperOS cust feature service property fix is missing" >&2; exit 1;
   }
 LEGACY_KERNEL_NAME=$(printf '\115\141\150\151\162\157')
 if unzip -p "$ZIP_PATH" anykernel.sh | grep -F "$LEGACY_KERNEL_NAME" >/dev/null; then
@@ -78,7 +82,7 @@ unzip -p "$ZIP_PATH" anykernel.sh | grep -Fx 'block=boot;' >/dev/null || {
   echo "boot handling is missing" >&2; exit 1;
 }
 unzip -p "$ZIP_PATH" anykernel.sh | \
-  grep -Fx 'patch_cmdline androidboot.force_normal_boot=1' >/dev/null || {
+  grep -Fx 'patch_cmdline androidboot.force_normal_boot androidboot.force_normal_boot=1' >/dev/null || {
     echo "normal-boot command-line patch is missing" >&2; exit 1;
   }
 unzip -p "$ZIP_PATH" anykernel.sh | \

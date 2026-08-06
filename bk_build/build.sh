@@ -90,7 +90,17 @@ make_kernel olddefconfig
 stage "检查" "核对必要选项"
 for symbol in MACH_XIAOMI_NABU BPF BPF_SYSCALL BPF_JIT BPF_JIT_ALWAYS_ON \
   BPF_EVENTS CGROUPS MEMCG CGROUP_SCHED CGROUP_FREEZER CGROUP_CPUACCT \
-  CGROUP_BPF CPUSETS PSI BLK_CGROUP CGROUP_WRITEBACK DEBUG_INFO \
+  CGROUP_BPF CGROUP_DEVICE CGROUP_PIDS CGROUP_NET_PRIO CPUSETS PSI \
+  BLK_CGROUP CGROUP_WRITEBACK FAIR_GROUP_SCHED \
+  SYSCTL SYSVIPC POSIX_MQUEUE NAMESPACES UTS_NS IPC_NS USER_NS PID_NS NET_NS \
+  SECCOMP SECCOMP_FILTER DEVTMPFS OVERLAY_FS TMPFS_POSIX_ACL TMPFS_XATTR \
+  FW_LOADER FW_LOADER_USER_HELPER VETH BRIDGE BRIDGE_NETFILTER \
+  NETFILTER NETFILTER_ADVANCED NF_CONNTRACK NF_CT_NETLINK NF_NAT \
+  NF_NAT_REDIRECT NF_TABLES IP_NF_IPTABLES IP_NF_FILTER IP_NF_NAT \
+  IP_NF_TARGET_MASQUERADE NETFILTER_XT_TARGET_TCPMSS \
+  NETFILTER_XT_MATCH_ADDRTYPE IP_ADVANCED_ROUTER IP_MULTIPLE_TABLES \
+  PREEMPT_RT_FULL CPU_FREQ_GOV_SCHEDUTIL \
+  CC_OPTIMIZE_FOR_SIZE DEBUG_INFO \
   LRU_GEN \
   DEBUG_INFO_DWARF4 DEBUG_INFO_BTF DEBUG_FS KALLSYMS FRAME_POINTER \
   PRINTK_TIME PSTORE \
@@ -101,17 +111,13 @@ for symbol in MACH_XIAOMI_NABU BPF BPF_SYSCALL BPF_JIT BPF_JIT_ALWAYS_ON \
   }
 done
 for symbol in DEBUG_INFO_REDUCED DEBUG_INFO_SPLIT DEBUG_KERNEL DYNAMIC_DEBUG \
-  KALLSYMS_ALL USER_NS PID_NS CGROUP_PIDS CGROUP_DEVICE \
-  CC_OPTIMIZE_FOR_PERFORMANCE; do
+  KALLSYMS_ALL CC_OPTIMIZE_FOR_PERFORMANCE SCHED_WALT IRQ_TIME_ACCOUNTING; do
   if grep -q "^CONFIG_$symbol=" "$OUT_DIR/.config"; then
     echo "required config is not disabled: CONFIG_$symbol" >&2; exit 1
   fi
 done
 grep -qx '# CONFIG_LRU_GEN_ENABLED is not set' "$OUT_DIR/.config" || {
   echo "required config is not disabled: CONFIG_LRU_GEN_ENABLED" >&2; exit 1;
-}
-grep -qx 'CONFIG_CC_OPTIMIZE_FOR_SIZE=y' "$OUT_DIR/.config" || {
-  echo "required config is not enabled: CONFIG_CC_OPTIMIZE_FOR_SIZE" >&2; exit 1;
 }
 grep -qx 'CONFIG_LOCALVERSION=""' "$OUT_DIR/.config" || {
   echo "kernel local version is incorrect" >&2; exit 1;
@@ -145,7 +151,15 @@ make_kernel -j"$JOBS" \
   drivers/devfreq/bimc-bwmon.o \
   drivers/kernelsu/ksu.o \
   arch/arm64/net/bpf_jit_comp.o fs/pstore/ram.o fs/pstore/platform.o \
-  kernel/printk/printk.o
+  kernel/printk/printk.o kernel/sys.o mm/oom_kill.o \
+  kernel/fork.o kernel/sched/core.o kernel/sched/fair.o \
+  kernel/cgroup/cgroup.o kernel/cgroup/pids.o security/device_cgroup.o \
+  kernel/pid_namespace.o kernel/user_namespace.o ipc/namespace.o \
+  drivers/net/veth.o fs/overlayfs/overlay.o \
+  drivers/block/zram/zram_drv.o mm/zsmalloc.o \
+  drivers/clk/qcom/clk-cpu-osm.o \
+  kernel/events/core.o kernel/trace/trace.o kernel/trace/trace_events.o \
+  kernel/trace/trace_output.o
 
 # DTBO_OBJS is discovered when make parses arch/arm64/boot/Makefile.  Build
 # the overlays first, then start a new make invocation so dtbo.img sees them.
@@ -192,7 +206,7 @@ python3 "$KERNEL_DIR/scripts/dtc/libfdt/mkdtboimg.py" \
   echo "vmlinux has no .BTF section" >&2; exit 1;
 }
 kernel_release=$(make_kernel -s kernelrelease)
-[ "$kernel_release" = "4.14.190_bk-Kernel_RT-16.2" ] || {
+[ "$kernel_release" = "4.14.190_bk-Kernel_RT-16.2_r1" ] || {
   echo "unexpected kernel release: $kernel_release" >&2; exit 1;
 }
 
@@ -220,6 +234,7 @@ git -C "$KERNEL_DIR" ls-files --others --exclude-standard > \
   echo "KERNEL_COMMIT=$(git -C "$KERNEL_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
   echo "KERNEL_DIRTY_DIFF_SHA256=$dirty_diff_sha"
   echo "KERNELSU_COMMIT=648e5988cf421172769f80ce07f86331b548c053"
+  echo "DROIDSPACES_COMMIT=7412f6fb732fe7f5e3dc6ac0848d82ef9ff98acf"
   echo "KERNELSU_TREE_SHA256=$ksu_tree_sha"
   echo "ANYKERNEL_TEMPLATE_SHA256=$anykernel_template_sha"
   echo "CLANG=$CLANG_DIR/bin/clang"

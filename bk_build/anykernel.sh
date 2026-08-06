@@ -1,7 +1,7 @@
 #!/sbin/sh
 # AnyKernel3 nabu installer.  The packer adds Image.gz, dtb and dtbo.img.
 properties() { "
-kernel.string=bk's kernel
+kernel.string=RinnRei's bk-Kernel / CoolApk @零音Rei
 device.name1=nabu
 do.devicecheck=1
 do.modules=0
@@ -22,7 +22,12 @@ if { [ -f "$split_img/cmdline.txt" ] && \
   abort "PBRP fastboot boot image detected." \
         "Restore the matching system boot image, then flash this package without rebooting recovery.";
 fi
-patch_cmdline androidboot.force_normal_boot=1
+patch_cmdline androidboot.force_normal_boot androidboot.force_normal_boot=1
+if [ -f "$ramdisk/prop.default" ]; then
+  patch_prop "$ramdisk/prop.default" ro.mi.os.custfeatureresolve true;
+else
+  abort "Missing boot ramdisk prop.default; refusing an incomplete HyperOS fix.";
+fi
 write_boot;
 
 # vendor_boot is handled as a separate image on Android 12+ devices.

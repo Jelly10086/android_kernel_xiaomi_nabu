@@ -60,19 +60,21 @@ zram_helper_target=/data/adb/bk-kernel/bk-zram-setup;
 [ -f "$reburnout_source" ] || abort "Missing Re.burnout-mode runtime policy.";
 [ -f "$zram_script_source" ] || abort "Missing zram writeback policy.";
 [ -f "$zram_helper_source" ] || abort "Missing zram setup helper.";
-[ -d /data/adb ] && [ -w /data/adb ] || \
-  abort "Decrypted /data with KernelSU is required for Re.burnout-mode.";
-mkdir -p /data/adb/service.d /data/adb/post-fs-data.d /data/adb/bk-kernel || \
-  abort "Cannot create KernelSU boot-script directories.";
-cp "$reburnout_source" "$reburnout_target" || \
-  abort "Cannot install Re.burnout-mode runtime policy.";
-cp "$zram_script_source" "$zram_script_target" || \
-  abort "Cannot install zram writeback policy.";
-cp "$zram_helper_source" "$zram_helper_target" || \
-  abort "Cannot install zram setup helper.";
-set_perm 0 0 0755 "$reburnout_target";
-set_perm 0 0 0755 "$zram_script_target";
-set_perm 0 0 0755 "$zram_helper_target";
+if [ -d /data/adb ] && [ -w /data/adb ]; then
+  mkdir -p /data/adb/service.d /data/adb/post-fs-data.d /data/adb/bk-kernel || \
+    abort "Cannot create KernelSU boot-script directories.";
+  cp "$reburnout_source" "$reburnout_target" || \
+    abort "Cannot install Re.burnout-mode runtime policy.";
+  cp "$zram_script_source" "$zram_script_target" || \
+    abort "Cannot install zram writeback policy.";
+  cp "$zram_helper_source" "$zram_helper_target" || \
+    abort "Cannot install zram setup helper.";
+  set_perm 0 0 0755 "$reburnout_target";
+  set_perm 0 0 0755 "$zram_script_target";
+  set_perm 0 0 0755 "$zram_helper_target";
+else
+  ui_print "Decrypted /data is unavailable; keeping existing KernelSU runtime scripts.";
+fi
 write_boot;
 
 # vendor_boot is handled as a separate image on Android 12+ devices.

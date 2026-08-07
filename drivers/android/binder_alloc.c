@@ -343,12 +343,12 @@ static inline struct vm_area_struct *binder_alloc_get_vma(
 	return vma;
 }
 
-static static inline bool line_is_frozen(struct task_struct *task)
+static inline bool line_is_frozen(struct task_struct *task)
 {
 	return frozen(task) || freezing(task);
 }
 
-static int send_netlink_message(char *msg, uint16_t len) {
+static int send_netlink_message(const char *msg, uint16_t len) {
     struct sk_buff *skbuffer;
     struct nlmsghdr *nlhdr;
 
@@ -369,25 +369,34 @@ static int send_netlink_message(char *msg, uint16_t len) {
     return netlink_unicast(rekernel_netlink, skbuffer, REKERNEL_USER_PORT, MSG_DONTWAIT);
 }
 
-static int start_rekernel_server(void) {
-  extern struct net init_net;
-  struct netlink_kernel_cfg rekernel_cfg = { 
-    .input = NULL,
-  };
-  if (rekernel_netlink != NULL)
-    return 0;
-  for (rekernel_netlink_unit = NETLINK_REKERNEL_MIN; rekernel_netlink_unit < NETLINK_REKERNEL_MAX; rekernel_netlink_unit++) {
-    rekernel_netlink = (struct sock *)netlink_kernel_create(&init_net, rekernel_netlink_unit, &rekernel_cfg);
-    if (rekernel_netlink != NULL)
-      break;
-  }
-  printk("Created Re:Kernel server! NETLINK UNIT: %d\n", rekernel_netlink_unit);
-  if (rekernel_netlink == NULL) {
-    printk("Failed to create Re:Kernel server!\n");
-    return -1;
-  }
-  return 0;
+static int __init start_rekernel_server(void)
+{
+	extern struct net init_net;
+	struct netlink_kernel_cfg rekernel_cfg = {
+		.input = NULL,
+	};
+
+	for (rekernel_netlink_unit = NETLINK_REKERNEL_MIN;
+	     rekernel_netlink_unit < NETLINK_REKERNEL_MAX;
+	     rekernel_netlink_unit++) {
+		rekernel_netlink = netlink_kernel_create(&init_net,
+							 rekernel_netlink_unit,
+							 &rekernel_cfg);
+		if (rekernel_netlink)
+			break;
+	}
+
+	if (!rekernel_netlink) {
+		pr_err("Re:Kernel: failed to create allocator netlink server\n");
+		return -EADDRINUSE;
+	}
+
+	pr_info("Re:Kernel: allocator netlink server created on unit %d\n",
+		rekernel_netlink_unit);
+	return 0;
 }
+late_initcall(start_rekernel_server);
+
 struct binder_buffer *binder_alloc_new_buf_locked(
 				struct binder_alloc *alloc,
 				size_t data_size,
@@ -433,7 +442,7 @@ struct binder_buffer *binder_alloc_new_buf_locked(
 		rcu_read_lock();
 		proc_task = find_task_by_vpid(alloc->pid);
 		rcu_read_unlock();
-		if (proc_task != NULL && start_rekernel_server() == 0) {
+		if (proc_task != NULL && rekernel_netlink) {
 			if (line_is_frozen(proc_task)) {
      			char binder_kmsg[REKERNEL_PACKET_SIZE];
                 snprintf(binder_kmsg, sizeof(binder_kmsg), "type=Binder,bindertype=free_buffer_full,oneway=1,from_pid=%d,from=%d,target_pid=%d,target=%d;", current->pid, task_uid(current).val, proc_task->pid, task_uid(proc_task).val);
@@ -1284,7 +1293,6 @@ void binder_alloc_copy_from_buffer(struct binder_alloc *alloc,
 	binder_alloc_do_buffer_copy(alloc, false, buffer, buffer_offset,
 				    dest, bytes);
 }
-
 void binder_alloc_shrinker_exit(void)
 {
 	unregister_shrinker(&binder_shrinker);

@@ -2987,7 +2987,7 @@ static inline bool line_is_frozen(struct task_struct *task)
 	return frozen(task) || freezing(task);
 }
 
-static int send_netlink_message(char *msg, uint16_t len) {
+static int send_netlink_message(const char *msg, uint16_t len) {
     struct sk_buff *skbuffer;
     struct nlmsghdr *nlhdr;
 
@@ -3008,25 +3008,34 @@ static int send_netlink_message(char *msg, uint16_t len) {
     return netlink_unicast(rekernel_netlink, skbuffer, REKERNEL_USER_PORT, MSG_DONTWAIT);
 }
 
-static int start_rekernel_server(void) {
-  extern struct net init_net;
-  struct netlink_kernel_cfg rekernel_cfg = { 
-    .input = NULL,
-  };
-  if (rekernel_netlink != NULL)
-    return 0;
-  for (rekernel_netlink_unit = NETLINK_REKERNEL_MIN; rekernel_netlink_unit < NETLINK_REKERNEL_MAX; rekernel_netlink_unit++) {
-    rekernel_netlink = (struct sock *)netlink_kernel_create(&init_net, rekernel_netlink_unit, &rekernel_cfg);
-    if (rekernel_netlink != NULL)
-      break;
-  }
-  printk("Created Re:Kernel server! NETLINK UNIT: %d\n", rekernel_netlink_unit);
-  if (rekernel_netlink == NULL) {
-    printk("Failed to create Re:Kernel server!\n");
-    return -1;
-  }
-  return 0;
+static int __init start_rekernel_server(void)
+{
+	extern struct net init_net;
+	struct netlink_kernel_cfg rekernel_cfg = {
+		.input = NULL,
+	};
+
+	for (rekernel_netlink_unit = NETLINK_REKERNEL_MIN;
+	     rekernel_netlink_unit < NETLINK_REKERNEL_MAX;
+	     rekernel_netlink_unit++) {
+		rekernel_netlink = netlink_kernel_create(&init_net,
+							 rekernel_netlink_unit,
+							 &rekernel_cfg);
+		if (rekernel_netlink)
+			break;
+	}
+
+	if (!rekernel_netlink) {
+		pr_err("Re:Kernel: failed to create binder netlink server\n");
+		return -EADDRINUSE;
+	}
+
+	pr_info("Re:Kernel: binder netlink server created on unit %d\n",
+		rekernel_netlink_unit);
+	return 0;
 }
+late_initcall(start_rekernel_server);
+
 static void binder_transaction(struct binder_proc *proc,
 			       struct binder_thread *thread,
 			       struct binder_transaction_data *tr, int reply,
@@ -3118,7 +3127,7 @@ static void binder_transaction(struct binder_proc *proc,
 		target_proc = target_thread->proc;
 		atomic_inc(&target_proc->tmp_ref);
 		binder_inner_proc_unlock(target_thread->proc);
-		if (start_rekernel_server() == 0) {
+		if (rekernel_netlink) {
 			if (target_proc
             	&& (NULL != target_proc->tsk)
             	&& (NULL != proc->tsk)
@@ -3182,7 +3191,7 @@ static void binder_transaction(struct binder_proc *proc,
 			goto err_dead_binder;
 		}
 		e->to_node = target_node->debug_id;
-		if (start_rekernel_server() == 0) {
+		if (rekernel_netlink) {
 			if (target_proc
             	&& (NULL != target_proc->tsk)
             	&& (NULL != proc->tsk)

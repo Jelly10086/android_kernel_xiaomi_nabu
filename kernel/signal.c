@@ -1218,7 +1218,7 @@ static inline bool line_is_frozen(struct task_struct *task)
 	return frozen(task) || freezing(task);
 }
 
-static int send_netlink_message(char *msg, uint16_t len) {
+static int send_netlink_message(const char *msg, uint16_t len) {
     struct sk_buff *skbuffer;
     struct nlmsghdr *nlhdr;
 
@@ -1239,37 +1239,50 @@ static int send_netlink_message(char *msg, uint16_t len) {
     return netlink_unicast(rekernel_netlink, skbuffer, REKERNEL_USER_PORT, MSG_DONTWAIT);
 }
 
-static int start_rekernel_server(void) {
-  extern struct net init_net;
-  struct netlink_kernel_cfg rekernel_cfg = { 
-    .input = NULL,
-  };
-  if (rekernel_netlink != NULL)
-    return 0;
-  for (rekernel_netlink_unit = NETLINK_REKERNEL_MIN; rekernel_netlink_unit < NETLINK_REKERNEL_MAX; rekernel_netlink_unit++) {
-    rekernel_netlink = (struct sock *)netlink_kernel_create(&init_net, rekernel_netlink_unit, &rekernel_cfg);
-    if (rekernel_netlink != NULL)
-      break;
-  }
-  printk("Created Re:Kernel server! NETLINK UNIT: %d\n", rekernel_netlink_unit);
-  if (rekernel_netlink == NULL) {
-    printk("Failed to create Re:Kernel server!\n");
-    return -1;
-  }
-  return 0;
+static int __init start_rekernel_server(void)
+{
+	extern struct net init_net;
+	struct netlink_kernel_cfg rekernel_cfg = {
+		.input = NULL,
+	};
+
+	for (rekernel_netlink_unit = NETLINK_REKERNEL_MIN;
+	     rekernel_netlink_unit < NETLINK_REKERNEL_MAX;
+	     rekernel_netlink_unit++) {
+		rekernel_netlink = netlink_kernel_create(&init_net,
+							 rekernel_netlink_unit,
+							 &rekernel_cfg);
+		if (rekernel_netlink)
+			break;
+	}
+
+	if (!rekernel_netlink) {
+		pr_err("Re:Kernel: failed to create netlink server\n");
+		return -EADDRINUSE;
+	}
+
+	pr_info("Re:Kernel: netlink server created on unit %d\n",
+		rekernel_netlink_unit);
+	return 0;
 }
+late_initcall(start_rekernel_server);
+
 int do_send_sig_info(int sig, struct siginfo *info, struct task_struct *p,
 			bool group)
 {
 	unsigned long flags;
 	int ret = -ESRCH;
-	if (start_rekernel_server() == 0) {
- 		if (line_is_frozen(p) && (sig == SIGKILL || sig == SIGTERM || sig == SIGABRT || sig == SIGQUIT)) {
-     		char binder_kmsg[REKERNEL_PACKET_SIZE];
-     		snprintf(binder_kmsg, sizeof(binder_kmsg), "type=Signal,signal=%d,killer=%d,dst=%d;", sig, task_uid(p).val, task_uid(current).val);
-     		send_netlink_message(binder_kmsg, strlen(binder_kmsg));
- 		}
- 	}
+
+	if (rekernel_netlink && line_is_frozen(p) &&
+	    (sig == SIGKILL || sig == SIGTERM || sig == SIGABRT ||
+	     sig == SIGQUIT)) {
+		char binder_kmsg[REKERNEL_PACKET_SIZE];
+
+		snprintf(binder_kmsg, sizeof(binder_kmsg),
+			 "type=Signal,signal=%d,killer=%d,dst=%d;", sig,
+			 task_uid(p).val, task_uid(current).val);
+		send_netlink_message(binder_kmsg, strlen(binder_kmsg));
+	}
 
 	if (lock_task_sighand(p, &flags)) {
 		ret = send_signal(sig, info, p, group);

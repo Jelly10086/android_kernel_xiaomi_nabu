@@ -9,7 +9,7 @@ else
 fi
 ARCH=${ARCH:-arm64}
 DEFCONFIG=${DEFCONFIG:-nabu_defconfig}
-OUT_DIR=${OUT_DIR:-/home/rinnrei/Project/uwuAP-temp/out/nabu-4.14.336-p1}
+OUT_DIR=${OUT_DIR:-/home/rinnrei/Project/uwuAP-temp/out/nabu-4.14.336-b1}
 JOBS=${JOBS:-4}
 CLANG_DIR=${CLANG_DIR:-/home/rinnrei/Project/uwuAP-temp/toolchains/aosp-clang-r547379}
 GCC64_DIR=${GCC64_DIR:-/home/rinnrei/Project/uwuAOSP/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9}

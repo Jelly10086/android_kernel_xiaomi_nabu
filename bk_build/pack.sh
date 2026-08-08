@@ -150,6 +150,10 @@ unzip -p "$ZIP_PATH" tools/bk-reburnout.sh | \
     echo "one-minute zram writeback policy is missing" >&2; exit 1;
   }
 unzip -p "$ZIP_PATH" tools/bk-reburnout.sh | \
+  grep -Fx 'REB_WB_DAILY_PAGES=65536' >/dev/null || {
+    echo "daily zram writeback budget is missing" >&2; exit 1;
+  }
+unzip -p "$ZIP_PATH" tools/bk-reburnout.sh | \
   grep -F 'reb_write /dev/cpuset/foreground/cpus 0-2,4-7' >/dev/null || {
     echo "foreground cpuset policy is missing" >&2; exit 1;
   }

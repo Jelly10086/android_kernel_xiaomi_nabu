@@ -14,6 +14,7 @@ REB_FORCE_FILE=$REB_DIR/Re.burnout-mode.force
 REB_DISABLE_FILE=$REB_DIR/Re.burnout-mode.disabled
 REB_RESTORE_FILE=$REB_DIR/Re.burnout-mode.restore
 REB_BOOT_FILE=$REB_DIR/Re.burnout-mode.boot_id
+REB_WB_STATE_FILE=$REB_DIR/zram-writeback.state
 REB_PINNED_FILE=$REB_DIR/Re.burnout-mode.top-app
 REB_PINNED_TMP=$REB_DIR/Re.burnout-mode.top-app.tmp
 REB_UI_TIDS_FILE=$REB_DIR/Re.burnout-mode.ui-tids
@@ -31,6 +32,9 @@ REB_RUNNABLE_EXIT=3
 REB_TEMP_ENTER=70000
 REB_TEMP_EXIT=80000
 REB_WB_FLUSH_SAMPLES=12
+REB_WB_DAY_SECONDS=86400
+REB_WB_DAILY_PAGES=65536
+REB_WB_BACKING_PAGES=262144
 
 reb_log()
 {
@@ -113,6 +117,44 @@ reb_setup_zram_backing()
 	reb_log "zram backing result=$REB_ZRAM_RESULT backing=$(cat "$REB_ZRAM/backing_dev" 2>/dev/null) limit=$(cat "$REB_ZRAM/writeback_limit" 2>/dev/null) enabled=$(cat "$REB_ZRAM/writeback_limit_enable" 2>/dev/null)"
 }
 
+reb_refill_writeback_limit()
+{
+	[ -n "$REB_BOOT_ID" ] || return 0
+	REB_WB_UPTIME=0
+	IFS=' .' read -r REB_WB_UPTIME REB_WB_UNUSED < /proc/uptime 2>/dev/null || return 0
+	case "$REB_WB_UPTIME" in ''|*[!0-9]*) return 0 ;; esac
+	REB_WB_DAY=$((REB_WB_UPTIME / REB_WB_DAY_SECONDS))
+	[ "$REB_WB_DAY" -gt 0 ] || return 0
+
+	REB_WB_STATE_BOOT=
+	REB_WB_STATE_DAY=-1
+	if [ -r "$REB_WB_STATE_FILE" ]; then
+		IFS=' ' read -r REB_WB_STATE_BOOT REB_WB_STATE_DAY \
+			< "$REB_WB_STATE_FILE" 2>/dev/null || true
+	fi
+	case "$REB_WB_STATE_DAY" in ''|*[!0-9]*) REB_WB_STATE_DAY=-1 ;; esac
+	if [ "$REB_WB_STATE_BOOT" = "$REB_BOOT_ID" ] && \
+	   [ "$REB_WB_STATE_DAY" -ge "$REB_WB_DAY" ]; then
+		return 0
+	fi
+
+	set -- $(cat /sys/block/zram0/bd_stat 2>/dev/null)
+	REB_WB_BACKED=${1:-0}
+	case "$REB_WB_BACKED" in ''|*[!0-9]*) return 0 ;; esac
+	REB_WB_HEADROOM=$((REB_WB_BACKING_PAGES - REB_WB_BACKED))
+	[ "$REB_WB_HEADROOM" -gt 0 ] || return 0
+	REB_WB_REFILL=$REB_WB_DAILY_PAGES
+	[ "$REB_WB_REFILL" -le "$REB_WB_HEADROOM" ] || \
+		REB_WB_REFILL=$REB_WB_HEADROOM
+
+	if printf '%s\n' "$REB_WB_REFILL" > \
+	   /sys/block/zram0/writeback_limit 2>/dev/null; then
+		printf '%s %s\n' "$REB_BOOT_ID" "$REB_WB_DAY" > \
+			"$REB_WB_STATE_FILE"
+		reb_log "zram daily budget pages=$REB_WB_REFILL bd_pages=$REB_WB_BACKED"
+	fi
+}
+
 reb_zram_writeback_tick()
 {
 	REB_ZRAM=/sys/block/zram0
@@ -129,6 +171,11 @@ reb_zram_writeback_tick()
 	fi
 	REB_ZRAM_LIMIT=$(cat "$REB_ZRAM/writeback_limit" 2>/dev/null)
 	case "$REB_ZRAM_LIMIT" in ''|*[!0-9]*) return 0 ;; esac
+	if [ "$REB_ZRAM_LIMIT" -eq 0 ]; then
+		reb_refill_writeback_limit
+		REB_ZRAM_LIMIT=$(cat "$REB_ZRAM/writeback_limit" 2>/dev/null)
+		case "$REB_ZRAM_LIMIT" in ''|*[!0-9]*) return 0 ;; esac
+	fi
 	[ "$REB_ZRAM_LIMIT" -gt 0 ] || return 0
 
 	REB_WB_IDLE_COUNT=$((REB_WB_IDLE_COUNT + 1))

@@ -52,6 +52,7 @@ The installer also configures a 1 GiB zram backing loop from Android's
 `/data/per_boot` area. HyperOS can initialize zram before that encrypted path
 and a free loop node are ready, so the kernel permits only the first missing
 backing device to be attached later without resetting active swap. Direct I/O
-and a 512 MiB per-boot writeback budget limit flash wear. Incompressible pages
-are written back when the display turns off; normal idle pages are written back
-after one minute of continuous screen-off time.
+and a 512 MiB initial writeback budget limit flash wear. After that budget is
+used, a screen-off device can add at most 256 MiB per uptime day when the 1 GiB
+backing file has space. Incompressible pages are written back when the display
+turns off; normal idle pages are written back after one minute.

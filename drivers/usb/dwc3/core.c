@@ -1626,8 +1626,17 @@ static int dwc3_runtime_resume(struct device *dev)
 	int		ret;
 
 	/* Check if platform glue driver handling PM, if not then handle here */
-	if (!dwc3_notify_event(dwc, DWC3_CORE_PM_RESUME_EVENT, 0))
+	if (!dwc3_notify_event(dwc, DWC3_CORE_PM_RESUME_EVENT, 0)) {
+		/*
+		 * Qualcomm glue resumes the hardware and asks the core callback to
+		 * return here.  Pending gadget IRQs still belong to the core and
+		 * must be consumed before its IRQ line is re-enabled.
+		 */
+		if (dwc->dr_mode == USB_DR_MODE_PERIPHERAL ||
+		    dwc->dr_mode == USB_DR_MODE_OTG)
+			dwc3_gadget_process_pending_events(dwc);
 		return 0;
+	}
 
 	device_init_wakeup(dev, false);
 

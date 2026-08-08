@@ -666,13 +666,12 @@ unsigned int cpuinfo_max_freq_cached;
 
 static bool should_use_cached_freq(int cpu)
 {
-	/* This is a safe check. may not be needed */
 	if (!cpuinfo_max_freq_cached)
 		return false;
 
 	/*
-	 * perfd already configure sched_lib_mask_force to
-	 * 0xf0 from user space. so re-using it.
+	 * perfd programs sched_lib_mask_force from userspace. Reuse that
+	 * cluster selection for processes classified by the scheduler hook.
 	 */
 	if (!(BIT(cpu) & sched_lib_mask_force))
 		return false;
@@ -789,13 +788,6 @@ static ssize_t store_scaling_governor(struct cpufreq_policy *policy,
 	int ret;
 	char	str_governor[16];
 	struct cpufreq_policy new_policy;
-
-	/*
-	 * Force the LITTLE CPU cluster to use the default govenor (performance)
-	 * because keeping it at its maximum frequency is best.
-	 */
-	if (cpumask_test_cpu(policy->cpu, cpu_lp_mask))
-		return count;
 
 	memcpy(&new_policy, policy, sizeof(*policy));
 

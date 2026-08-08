@@ -4327,8 +4327,18 @@ err0:
 void dwc3_gadget_process_pending_events(struct dwc3 *dwc)
 {
 	if (dwc->pending_events) {
-		dwc3_interrupt(dwc->irq_gadget, dwc->ev_buf);
-		dwc3_thread_interrupt(dwc->irq_gadget, dwc->ev_buf);
+		irqreturn_t ret;
+
+		/*
+		 * This Qualcomm tree uses dwc3_interrupt() as a wrapper around
+		 * dwc3_check_event_buf() and passes it a struct dwc3.  The
+		 * upstream threaded-IRQ backport passed ev_buf instead, which is
+		 * interpreted as a struct dwc3 and corrupts pending-event state.
+		 * Process the resumed event synchronously with the native helpers.
+		 */
+		ret = dwc3_check_event_buf(dwc->ev_buf);
+		if (ret == IRQ_WAKE_THREAD)
+			dwc3_thread_interrupt(dwc->irq_gadget, dwc->ev_buf);
 		pm_runtime_put(dwc->dev);
 		dwc->pending_events = false;
 		enable_irq(dwc->irq_gadget);

@@ -15,7 +15,7 @@ match the maintainer workstation. `nabu-perf_defconfig` is not a supported
 default because it does not select `CONFIG_MACH_XIAOMI_NABU`.
 
 Package names include the kernel release suffix:
-`bk-Kernel_nabu-A16-Hyper-R2.3-HHMMSS.zip`. The ZIP contains only
+`bk-Kernel_nabu-A16-Hyper-R2.3w1-HHMMSS.zip`. The ZIP contains only
 files consumed by the installer. Build metadata stays under `artifacts/`; CI
 generates the GitHub Release description after the build succeeds.
 
@@ -39,9 +39,10 @@ stock HyperOS boot header. The source ZIP and ramdisk hashes are recorded in
 `bk_build/recovery/README.md` and in every build's `build-info.txt`.
 
 The installer also places `bk-reburnout.sh` in KernelSU `service.d`. It applies
-the nabu cpuset layout and swappiness 200, pins SystemUI and the display
-composer to CPUs 4-7, and keeps the launcher main/rendering threads on CPUs
-4-6 with CPU7 available to auxiliary workers. It enables `Re.burnout-mode`
+the nabu cpuset layout and swappiness 180. Foreground and top-app tasks retain
+CPUs 0-7; only their main rendering workers and the two busiest threads use
+CPUs 4-7. SystemUI transition workers and the launcher rendering, gesture, and
+widget-composition threads retain their dedicated big-core affinity. It enables `Re.burnout-mode`
 only after a sustained CPU/GPU load. The mode raises CPU, GPU, UFS, DDR, LLCC,
 and GPU-bus performance requests, exits on sustained low load or 80 C, and
 restores every saved sysfs value. Create

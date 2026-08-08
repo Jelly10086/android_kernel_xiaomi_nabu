@@ -210,7 +210,7 @@ python3 "$KERNEL_DIR/scripts/dtc/libfdt/mkdtboimg.py" \
   echo "vmlinux has no .BTF section" >&2; exit 1;
 }
 kernel_release=$(make_kernel -s kernelrelease)
-[ "$kernel_release" = "4.14.190_bk-Kernel_16.2-R2.3" ] || {
+[ "$kernel_release" = "4.14.190_bk-Kernel_16.2-R2.3w1" ] || {
   echo "unexpected kernel release: $kernel_release" >&2; exit 1;
 }
 

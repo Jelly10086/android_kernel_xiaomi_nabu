@@ -1678,6 +1678,8 @@ ffs_fs_mount(struct file_system_type *t, int flags,
 		return ERR_PTR(ret);
 
 	ffs = ffs_data_new(dev_name);
+	if (IS_ERR(ffs))
+		return ERR_CAST(ffs);
 	if (unlikely(!ffs))
 		return ERR_PTR(-ENOMEM);
 	ffs->file_perms = data.perms;
@@ -3385,7 +3387,6 @@ static int _ffs_func_bind(struct usb_configuration *c,
 			ret = ss_len;
 			goto error;
 		}
-		func->function.ssp_descriptors = func->function.ss_descriptors;
 	} else {
 		ss_len = 0;
 	}
@@ -3844,8 +3845,6 @@ static void ffs_func_unbind(struct usb_configuration *c,
 	func->function.ss_descriptors = NULL;
 	func->function.ssp_descriptors = NULL;
 	func->interfaces_nums = NULL;
-
-	ffs_event_add(ffs, FUNCTIONFS_UNBIND);
 
 	ffs_log("exit: state %d setup_state %d flag %lu", ffs->state,
 		ffs->setup_state, ffs->flags);

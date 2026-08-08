@@ -720,7 +720,7 @@ REB_LAST_SYSTEMUI_TASK_COUNT=-1
 trap 'reb_cleanup' EXIT HUP INT TERM
 
 case "$(uname -r)" in
-	4.14.336_bk-Kernel_17.0-P1) ;;
+	4.14.336_bk-Kernel_17.0-b1) ;;
 	*) reb_log "ignored on incompatible kernel $(uname -r)"; exit 0 ;;
 esac
 

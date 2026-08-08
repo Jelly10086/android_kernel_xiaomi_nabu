@@ -104,26 +104,6 @@ jobs:
             echo "PAHOLE=$pahole"
           } >> "$GITHUB_ENV"
 
-      - name: Restore compiler cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: ${{ runner.temp }}/ccache
-          key: nabu-ccache-${{ runner.os }}-${{ env.CLANG_COMMIT }}-${{ hashFiles('arch/arm64/configs/nabu_defconfig', 'bk_build/configs/nabu-a16.config', 'Makefile') }}-${{ github.sha }}
-          restore-keys: |
-            nabu-ccache-${{ runner.os }}-${{ env.CLANG_COMMIT }}-${{ hashFiles('arch/arm64/configs/nabu_defconfig', 'bk_build/configs/nabu-a16.config', 'Makefile') }}-
-            nabu-ccache-${{ runner.os }}-${{ env.CLANG_COMMIT }}-
-
-      - name: Configure compiler cache
-        shell: bash
-        env:
-          CCACHE_DIR: ${{ runner.temp }}/ccache
-        run: |
-          set -euxo pipefail
-          mkdir -p "$CCACHE_DIR"
-          ccache --max-size=4G
-          ccache --set-config=compression=true
-          ccache --zero-stats
-
       - name: Build and validate package
         shell: bash
         env:
@@ -131,19 +111,10 @@ jobs:
           OUT_DIR: ${{ github.workspace }}/out/ci
           JOBS: "4"
           DISABLE_LTO_CACHE: "1"
-          CCACHE: ccache
-          CCACHE_DIR: ${{ runner.temp }}/ccache
         run: |
           set -euxo pipefail
           ./bk_build/build.sh
           df -h /
-
-      - name: Show compiler cache statistics
-        if: always()
-        shell: bash
-        env:
-          CCACHE_DIR: ${{ runner.temp }}/ccache
-        run: ccache --show-stats
 
       - name: Locate package
         id: package
@@ -153,7 +124,7 @@ jobs:
         run: |
           set -euo pipefail
           package=$(find "$OUT_DIR/packages" -maxdepth 1 -type f \
-            -name 'bk-Kernel_nabu-A16-Hyper-R*-*.zip' -print -quit)
+            -name 'bk-Kernel_nabu-A17-Hyper-P1-*.zip' -print -quit)
           test -n "$package"
           test -f "$package.sha256"
           unzip -t "$package" >/dev/null
@@ -166,7 +137,7 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: bk-Kernel_nabu-A16-Hyper
+          name: bk-Kernel_nabu-A17-Hyper-P1
           path: |
             ${{ steps.package.outputs.package }}
             ${{ steps.package.outputs.checksum }}
@@ -193,7 +164,7 @@ jobs:
           fi
           notes="${RUNNER_TEMP}/release-notes.md"
           {
-            echo "Kernel: 4.14.190_bk-Kernel_16.2-R2.3w1"
+            echo "Kernel: 4.14.336_bk-Kernel_17.0-P1"
             echo "Target: Xiaomi Pad 5 (nabu)"
             echo "Build: GitHub Actions run ${GITHUB_RUN_NUMBER}"
             echo "Commit: ${GITHUB_SHA}"

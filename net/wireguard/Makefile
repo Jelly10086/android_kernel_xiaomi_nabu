@@ -3,6 +3,8 @@
 # Copyright (C) 2015-2019 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.
 
 ccflags-y := -O3
+# Android stable 4.14.336 carries APIs from newer upstream kernels.
+ccflags-y += -DCOMPAT_HAVE_4_14_336_BACKPORTS
 ccflags-$(CONFIG_WIREGUARD_DEBUG) += -DDEBUG -g
 ccflags-y += -D'pr_fmt(fmt)=KBUILD_MODNAME ": " fmt'
 ccflags-y += -Wframe-larger-than=2048

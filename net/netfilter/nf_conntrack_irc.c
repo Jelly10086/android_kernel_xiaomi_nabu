@@ -319,11 +319,14 @@ static int help(struct sk_buff *skb, unsigned int protoff,
 			data += 6;
 			nick_end = data;
 			i = 0;
-			while ((*nick_end != 0x0d) &&
+			while (nick_end + 1 < data_limit &&
+			       (*nick_end != 0x0d) &&
 			       (*(nick_end + 1) != '\n')) {
 				nick_end++;
 				i++;
 			}
+			if (nick_end + 1 >= data_limit)
+				goto out;
 			tuple = &ct->tuplehash[!dir].tuple;
 			temp = search_client_by_ip(tuple);
 			if (temp && temp->nickname) {
@@ -383,19 +386,32 @@ static int help(struct sk_buff *skb, unsigned int protoff,
 			ret = NF_ACCEPT;
 			goto out;
 		}
-		/* strlen("\1DCC SENT t AAAAAAAA P\1\n")=24
-		 * 5+MINMATCHLEN+strlen("t AAAAAAAA P\1\n")=14
-		 */
 		data = ib_ptr;
-		while (data < data_limit - (19 + MINMATCHLEN)) {
-			if (memcmp(data, "\1DCC ", 5)) {
+		/* CTCP commands are valid only at the start of an IRC message. */
+		while (data < data_limit - 10) {
+			if (*data == ' ' || *data == '\r' || *data == '\n')
+				data++;
+			else
+				break;
+		}
+
+		/* strlen("PRIVMSG x ")=10 */
+		if (data < data_limit - 10) {
+			if (strncasecmp("PRIVMSG ", data, 8))
+				goto out;
+			data += 8;
+		}
+
+		/* strlen(" :\1DCC SENT t AAAAAAAA P\1\n")=26 */
+		while (data < data_limit - (21 + MINMATCHLEN)) {
+			if (memcmp(data, " :", 2)) {
 				data++;
 				continue;
 			}
+			data += 2;
+			if (memcmp(data, "\1DCC ", 5))
+				goto out;
 			data += 5;
-			/* we have at least (19+MINMATCHLEN)-5
-			 *bytes valid data left
-			 */
 			iph = ip_hdr(skb);
 			pr_debug("DCC found in master %pI4:%u %pI4:%u\n",
 				 &iph->saddr, ntohs(th->source),
@@ -410,10 +426,7 @@ static int help(struct sk_buff *skb, unsigned int protoff,
 				data += strlen(dccprotos[i]);
 				pr_debug("DCC %s detected\n", dccprotos[i]);
 
-				/* we have at least
-				 * (19+MINMATCHLEN)-5-dccprotos[i].matchlen
-				 *bytes valid data left (== 14/13 bytes)
-				 */
+				/* At least 14/13 bytes remain for SEND/CHAT. */
 				if (parse_dcc(data, data_limit, &dcc_ip,
 					      &dcc_port, &addr_beg_p,
 					      &addr_end_p)) {
@@ -424,12 +437,11 @@ static int help(struct sk_buff *skb, unsigned int protoff,
 				pr_debug("DCC bound ip/port: %pI4:%u\n",
 					 &dcc_ip, dcc_port);
 
-				/* dcc_ip can be the internal OR
-				 *external (NAT'ed) IP
-				 */
+				/* dcc_ip can be the internal or NAT'ed IP. */
 				tuple = &ct->tuplehash[dir].tuple;
-				if (tuple->src.u3.ip != dcc_ip &&
-				    tuple->dst.u3.ip != dcc_ip) {
+				if ((tuple->src.u3.ip != dcc_ip &&
+				     ct->tuplehash[!dir].tuple.dst.u3.ip != dcc_ip) ||
+				    dcc_port == 0) {
 					net_warn_ratelimited("Forged DCC command from %pI4: %pI4:%u\n",
 							     &tuple->src.u3.ip,
 							     &dcc_ip, dcc_port);

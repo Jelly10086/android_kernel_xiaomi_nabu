@@ -7,7 +7,7 @@ if [ -n "${KERNEL_DIR:-}" ]; then
 else
   KERNEL_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 fi
-OUT_DIR=${OUT_DIR:-$KERNEL_DIR/out/nabu-a16}
+OUT_DIR=${OUT_DIR:-/home/rinnrei/Project/uwuAP-temp/out/nabu-4.14.336-p1}
 ARTIFACTS=${ARTIFACTS:-$OUT_DIR/artifacts}
 PACKAGE_ROOT=${PACKAGE_ROOT:-$OUT_DIR/packages}
 TEMPLATE=$SCRIPT_DIR/anykernel.sh
@@ -57,7 +57,7 @@ case "$KERNEL_SUFFIX" in
 esac
 
 stamp=$(date -u +%H%M%S)
-PACKAGE="$PACKAGE_ROOT/bk-Kernel_nabu-A16-Hyper-$KERNEL_SUFFIX-$stamp"
+PACKAGE="$PACKAGE_ROOT/bk-Kernel_nabu-A17-Hyper-$KERNEL_SUFFIX-$stamp"
 ZIP_PATH="$PACKAGE.zip"
 [ ! -e "$PACKAGE" ] && [ ! -e "$ZIP_PATH" ] || { echo "package already exists: $PACKAGE" >&2; exit 1; }
 mkdir -p "$PACKAGE"

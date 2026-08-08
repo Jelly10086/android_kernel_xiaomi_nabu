@@ -92,18 +92,19 @@
  * This is made more complicated by various memory models and PAE.
  */
 
-#ifndef MAX_PHYSMEM_BITS
-#ifdef CONFIG_HIGHMEM64G
-#define MAX_PHYSMEM_BITS 36
-#else /* !CONFIG_HIGHMEM64G */
+#ifndef MAX_POSSIBLE_PHYSMEM_BITS
+#ifdef MAX_PHYSMEM_BITS
+#define MAX_POSSIBLE_PHYSMEM_BITS MAX_PHYSMEM_BITS
+#else
 /*
  * If this definition of MAX_PHYSMEM_BITS is used, OBJ_INDEX_BITS will just
  * be PAGE_SHIFT
  */
-#define MAX_PHYSMEM_BITS BITS_PER_LONG
+#define MAX_POSSIBLE_PHYSMEM_BITS BITS_PER_LONG
 #endif
 #endif
-#define _PFN_BITS		(MAX_PHYSMEM_BITS - PAGE_SHIFT)
+
+#define _PFN_BITS		(MAX_POSSIBLE_PHYSMEM_BITS - PAGE_SHIFT)
 
 /*
  * Head in allocated object should have OBJ_ALLOCATED_TAG
@@ -254,6 +255,10 @@ struct zs_pool {
 #ifdef CONFIG_COMPACTION
 	struct inode *inode;
 	struct work_struct free_work;
+	/* Wait for page migration to finish before destroying the pool. */
+	wait_queue_head_t migration_wait;
+	atomic_long_t isolated_pages;
+	bool destroying;
 #endif
 	/* protect page/zspage migration */
 	rwlock_t migrate_lock;
@@ -1909,6 +1914,20 @@ static void dec_zspage_isolation(struct zspage *zspage)
 	zspage->isolated--;
 }
 
+static inline void zs_pool_dec_isolated(struct zs_pool *pool)
+{
+	VM_BUG_ON(atomic_long_read(&pool->isolated_pages) <= 0);
+	atomic_long_dec(&pool->isolated_pages);
+	/*
+	 * Checking pool->destroying must happen after atomic_long_dec()
+	 * for pool->isolated_pages above. Paired with the smp_mb() in
+	 * zs_unregister_migration().
+	 */
+	smp_mb__after_atomic();
+	if (atomic_long_read(&pool->isolated_pages) == 0 && pool->destroying)
+		wake_up_all(&pool->migration_wait);
+}
+
 static void replace_sub_page(struct size_class *class, struct zspage *zspage,
 				struct page *newpage, struct page *oldpage)
 {
@@ -1934,6 +1953,8 @@ static void replace_sub_page(struct size_class *class, struct zspage *zspage,
 
 bool zs_page_isolate(struct page *page, isolate_mode_t mode)
 {
+	struct address_space *mapping;
+	struct zs_pool *pool;
 	struct zspage *zspage;
 
 	/*
@@ -1943,10 +1964,22 @@ bool zs_page_isolate(struct page *page, isolate_mode_t mode)
 	VM_BUG_ON_PAGE(!PageMovable(page), page);
 	VM_BUG_ON_PAGE(PageIsolated(page), page);
 
+	mapping = page_mapping(page);
+	pool = mapping->private_data;
+
+	read_lock(&pool->migrate_lock);
+	if (pool->destroying) {
+		read_unlock(&pool->migrate_lock);
+		return false;
+	}
+
 	zspage = get_zspage(page);
 	migrate_write_lock(zspage);
+	if (!zspage->isolated)
+		atomic_long_inc(&pool->isolated_pages);
 	inc_zspage_isolation(zspage);
 	migrate_write_unlock(zspage);
+	read_unlock(&pool->migrate_lock);
 
 	return true;
 }
@@ -2020,10 +2053,12 @@ int zs_page_migrate(struct address_space *mapping, struct page *newpage,
 	 * Since we complete the data copy and set up new zspage structure,
 	 * it's okay to release migration_lock.
 	 */
-	write_unlock(&pool->migrate_lock);
-	spin_unlock(&class->lock);
 	dec_zspage_isolation(zspage);
+	if (!zspage->isolated)
+		zs_pool_dec_isolated(pool);
 	migrate_write_unlock(zspage);
+	spin_unlock(&class->lock);
+	write_unlock(&pool->migrate_lock);
 
 	get_page(newpage);
 	if (page_zone(newpage) != page_zone(page)) {
@@ -2039,15 +2074,24 @@ int zs_page_migrate(struct address_space *mapping, struct page *newpage,
 
 void zs_page_putback(struct page *page)
 {
+	struct address_space *mapping;
+	struct zs_pool *pool;
 	struct zspage *zspage;
 
 	VM_BUG_ON_PAGE(!PageMovable(page), page);
 	VM_BUG_ON_PAGE(!PageIsolated(page), page);
 
+	mapping = page_mapping(page);
+	pool = mapping->private_data;
+
+	read_lock(&pool->migrate_lock);
 	zspage = get_zspage(page);
 	migrate_write_lock(zspage);
 	dec_zspage_isolation(zspage);
+	if (!zspage->isolated)
+		zs_pool_dec_isolated(pool);
 	migrate_write_unlock(zspage);
+	read_unlock(&pool->migrate_lock);
 }
 
 const struct address_space_operations zsmalloc_aops = {
@@ -2071,6 +2115,12 @@ static int zs_register_migration(struct zs_pool *pool)
 
 static void zs_unregister_migration(struct zs_pool *pool)
 {
+	write_lock(&pool->migrate_lock);
+	pool->destroying = true;
+	write_unlock(&pool->migrate_lock);
+
+	wait_event(pool->migration_wait,
+		   atomic_long_read(&pool->isolated_pages) == 0);
 	flush_work(&pool->free_work);
 	iput(pool->inode);
 }
@@ -2155,11 +2205,13 @@ static unsigned long zs_can_compact(struct size_class *class)
 	return obj_wasted * class->pages_per_zspage;
 }
 
-static void __zs_compact(struct zs_pool *pool, struct size_class *class)
+static unsigned long __zs_compact(struct zs_pool *pool,
+				  struct size_class *class)
 {
 	struct zs_compact_control cc;
 	struct zspage *src_zspage;
 	struct zspage *dst_zspage = NULL;
+	unsigned long pages_freed = 0;
 
 	/* protect the race between zpage migration and zs_free */
 	write_lock(&pool->migrate_lock);
@@ -2203,9 +2255,10 @@ static void __zs_compact(struct zs_pool *pool, struct size_class *class)
 		if (putback_zspage(class, src_zspage) == ZS_EMPTY) {
 			migrate_write_unlock(src_zspage);
 			free_zspage(pool, class, src_zspage);
-			pool->stats.pages_compacted += class->pages_per_zspage;
-		} else
+			pages_freed += class->pages_per_zspage;
+		} else {
 			migrate_write_unlock(src_zspage);
+		}
 		spin_unlock(&class->lock);
 		write_unlock(&pool->migrate_lock);
 		cond_resched();
@@ -2220,12 +2273,15 @@ static void __zs_compact(struct zs_pool *pool, struct size_class *class)
 
 	spin_unlock(&class->lock);
 	write_unlock(&pool->migrate_lock);
+
+	return pages_freed;
 }
 
 unsigned long zs_compact(struct zs_pool *pool)
 {
 	int i;
 	struct size_class *class;
+	unsigned long pages_freed = 0;
 
 	for (i = ZS_SIZE_CLASSES - 1; i >= 0; i--) {
 		class = pool->size_class[i];
@@ -2233,10 +2289,11 @@ unsigned long zs_compact(struct zs_pool *pool)
 			continue;
 		if (class->index != i)
 			continue;
-		__zs_compact(pool, class);
+		pages_freed += __zs_compact(pool, class);
 	}
+	atomic_long_add(pages_freed, &pool->stats.pages_compacted);
 
-	return pool->stats.pages_compacted;
+	return pages_freed;
 }
 EXPORT_SYMBOL_GPL(zs_compact);
 
@@ -2253,13 +2310,12 @@ static unsigned long zs_shrinker_scan(struct shrinker *shrinker,
 	struct zs_pool *pool = container_of(shrinker, struct zs_pool,
 			shrinker);
 
-	pages_freed = pool->stats.pages_compacted;
 	/*
 	 * Compact classes and calculate compaction delta.
 	 * Can run concurrently with a manually triggered
 	 * (by user) compaction.
 	 */
-	pages_freed = zs_compact(pool) - pages_freed;
+	pages_freed = zs_compact(pool);
 
 	return pages_freed ? pages_freed : SHRINK_STOP;
 }
@@ -2326,6 +2382,9 @@ struct zs_pool *zs_create_pool(const char *name)
 
 	init_deferred_free(pool);
 	rwlock_init(&pool->migrate_lock);
+#ifdef CONFIG_COMPACTION
+	init_waitqueue_head(&pool->migration_wait);
+#endif
 
 	pool->name = kstrdup(name, GFP_KERNEL);
 	if (!pool->name)

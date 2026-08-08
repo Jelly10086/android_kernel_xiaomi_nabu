@@ -10,6 +10,14 @@
 #include <linux/kernel.h>
 #include <asm/bug.h>
 
+/* Keep WireGuard's bundled implementation separate from the kernel API. */
+#define blake2s		wg_blake2s
+#define blake2s_init	wg_blake2s_init
+#define blake2s_init_key wg_blake2s_init_key
+#define blake2s_update	wg_blake2s_update
+#define blake2s_final	wg_blake2s_final
+#define blake2s_hmac	wg_blake2s_hmac
+
 enum blake2s_lengths {
 	BLAKE2S_BLOCK_SIZE = 64,
 	BLAKE2S_HASH_SIZE = 32,

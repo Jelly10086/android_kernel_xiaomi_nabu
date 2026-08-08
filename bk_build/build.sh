@@ -9,19 +9,19 @@ else
 fi
 ARCH=${ARCH:-arm64}
 DEFCONFIG=${DEFCONFIG:-nabu_defconfig}
-OUT_DIR=${OUT_DIR:-$KERNEL_DIR/out/nabu-a16}
+OUT_DIR=${OUT_DIR:-/home/rinnrei/Project/uwuAP-temp/out/nabu-4.14.336-p1}
 JOBS=${JOBS:-4}
 CLANG_DIR=${CLANG_DIR:-/home/rinnrei/Project/uwuAP-temp/toolchains/aosp-clang-r547379}
 GCC64_DIR=${GCC64_DIR:-/home/rinnrei/Project/uwuAOSP/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9}
 GCC32_DIR=${GCC32_DIR:-/home/rinnrei/Project/uwuAOSP/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9}
 PAHOLE=${PAHOLE:-/home/rinnrei/Project/uwuAOSP/prebuilts/kernel-build-tools/linux-x86/bin/pahole}
 PAHOLE_FLAGS=${PAHOLE_FLAGS:-"--skip_encoding_btf_decl_tag --skip_encoding_btf_type_tag --skip_encoding_btf_enum64"}
-DISABLE_LTO_CACHE=${DISABLE_LTO_CACHE:-0}
+DISABLE_LTO_CACHE=${DISABLE_LTO_CACHE:-1}
 CCACHE=${CCACHE:-}
 CROSS_COMPILE=${CROSS_COMPILE:-aarch64-linux-androidkernel-}
 CROSS_COMPILE_ARM32=${CROSS_COMPILE_ARM32:-arm-linux-androideabi-}
 CLANG_TRIPLE=${CLANG_TRIPLE:-aarch64-linux-gnu-}
-FRAGMENT=${FRAGMENT:-$SCRIPT_DIR/configs/nabu-a16.config}
+FRAGMENT=${FRAGMENT:-$SCRIPT_DIR/configs/nabu-a17.config}
 
 case "$JOBS" in ''|*[!0-9]*) echo "JOBS must be a positive integer" >&2; exit 2 ;; esac
 [ "$JOBS" -gt 0 ] || { echo "JOBS must be greater than zero" >&2; exit 2; }
@@ -94,7 +94,8 @@ for symbol in MACH_XIAOMI_NABU BPF BPF_SYSCALL BPF_JIT BPF_JIT_ALWAYS_ON \
   SYSCTL SYSVIPC POSIX_MQUEUE NAMESPACES UTS_NS IPC_NS USER_NS PID_NS NET_NS \
   SECCOMP SECCOMP_FILTER DEVTMPFS OVERLAY_FS TMPFS_POSIX_ACL TMPFS_XATTR \
   FW_LOADER FW_LOADER_USER_HELPER VETH BRIDGE BRIDGE_NETFILTER \
-  NETFILTER NETFILTER_ADVANCED NF_CONNTRACK NF_CT_NETLINK NF_NAT \
+  NETFILTER NETFILTER_ADVANCED NF_CONNTRACK NF_CONNTRACK_PROCFS \
+  NF_CT_NETLINK NF_NAT \
   NF_NAT_REDIRECT NF_TABLES IP_NF_IPTABLES IP_NF_FILTER IP_NF_NAT \
   IP_NF_TARGET_MASQUERADE NETFILTER_XT_TARGET_TCPMSS \
   NETFILTER_XT_MATCH_ADDRTYPE IP_ADVANCED_ROUTER IP_MULTIPLE_TABLES \
@@ -134,7 +135,7 @@ grep -qx 'CONFIG_PANIC_TIMEOUT=-1' "$OUT_DIR/.config" || {
 grep -qx 'CONFIG_CMDLINE=""' "$OUT_DIR/.config" || {
   echo "legacy ramoops command line is still enabled" >&2; exit 1;
 }
-cp "$OUT_DIR/.config" "$OUT_DIR/nabu-a16.config"
+cp "$OUT_DIR/.config" "$OUT_DIR/nabu-a17.config"
 
 # Build generated-header owners before the parallel object batch.
 stage "Build" "编译内核对象"
@@ -147,14 +148,33 @@ make_kernel -j"$JOBS" \
   net/core/filter.o kernel/bpf/cgroup.o net/ipv4/udp.o net/ipv6/udp.o \
   drivers/devfreq/bimc-bwmon.o \
   drivers/kernelsu/ksu.o \
+  arch/arm64/kernel/setup.o arch/arm64/kernel/cpu_errata.o \
   arch/arm64/net/bpf_jit_comp.o fs/pstore/ram.o fs/pstore/platform.o \
   kernel/printk/printk.o kernel/sys.o mm/oom_kill.o \
   kernel/fork.o kernel/sched/core.o kernel/sched/fair.o \
+  kernel/futex.o kernel/irq/handle.o kernel/irq/manage.o kernel/kthread.o \
+  kernel/ptrace.o kernel/smp.o kernel/workqueue.o \
   kernel/cgroup/cgroup.o kernel/cgroup/pids.o security/device_cgroup.o \
   kernel/pid_namespace.o kernel/user_namespace.o ipc/namespace.o \
   drivers/net/veth.o fs/overlayfs/ \
   drivers/block/zram/zram_drv.o mm/zsmalloc.o \
+  mm/maccess.o mm/memcontrol.o \
+  drivers/android/binder.o drivers/staging/android/ion/ion.o \
+  drivers/scsi/ufs/ufshcd.o drivers/scsi/ufs/ufs-qcom.o \
+  drivers/usb/dwc3/core.o drivers/usb/dwc3/gadget.o \
+  drivers/usb/gadget/configfs.o \
+  drivers/usb/gadget/function/f_accessory.o \
+  drivers/usb/gadget/function/f_fs.o \
+  drivers/usb/gadget/function/rndis.o drivers/usb/host/xhci.o \
+  fs/f2fs/ fs/pstore/ \
+  net/core/dev.o net/core/skbuff.o net/ipv4/inet_connection_sock.o \
+  net/ipv6/ip6_output.o net/netfilter/nf_conntrack_irc.o \
+  sound/core/control.o \
   drivers/clk/qcom/clk-cpu-osm.o \
+  drivers/clocksource/arm_arch_timer.o net/wireguard/ \
+  drivers/mailbox/mailbox.o \
+  drivers/md/dm-verity-target.o \
+  drivers/soc/qcom/early_random.o \
   kernel/events/core.o kernel/trace/trace.o kernel/trace/trace_events.o \
   kernel/trace/trace_output.o
 
@@ -209,8 +229,14 @@ python3 "$KERNEL_DIR/scripts/dtc/libfdt/mkdtboimg.py" \
 "$CLANG_DIR/bin/llvm-objdump" -h "$OUT_DIR/vmlinux" | grep -F '.BTF' >/dev/null || {
   echo "vmlinux has no .BTF section" >&2; exit 1;
 }
+"$PAHOLE" -F btf -C task_struct "$OUT_DIR/vmlinux" > \
+  "$OUT_DIR/artifacts/btf-task_struct.txt"
+grep -Eq '(^|[[:space:]])pid[[:space:]]*;' \
+  "$OUT_DIR/artifacts/btf-task_struct.txt" || {
+  echo "BTF task_struct::pid is missing" >&2; exit 1;
+}
 kernel_release=$(make_kernel -s kernelrelease)
-[ "$kernel_release" = "4.14.190_bk-Kernel_16.2-R2.3w1" ] || {
+[ "$kernel_release" = "4.14.336_bk-Kernel_17.0-P1" ] || {
   echo "unexpected kernel release: $kernel_release" >&2; exit 1;
 }
 
@@ -251,6 +277,8 @@ git -C "$KERNEL_DIR" ls-files --others --exclude-standard > \
   echo "ARM64_IMAGE_SIZE=$arm64_image_size"
   echo "KERNEL_COMMIT=$(git -C "$KERNEL_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
   echo "KERNEL_DIRTY_DIFF_SHA256=$dirty_diff_sha"
+  echo "ANDROID_STABLE_COMMIT=014241ad77dda0eafbdf671d5b8e86917d8ec97e"
+  echo "QUALCOMM_REFERENCE_COMMIT=d1966c80dcfcabe6058eba05ded94a9af967760f"
   echo "KERNELSU_COMMIT=648e5988cf421172769f80ce07f86331b548c053"
   echo "DROIDSPACES_COMMIT=7412f6fb732fe7f5e3dc6ac0848d82ef9ff98acf"
   echo "KERNELSU_TREE_SHA256=$ksu_tree_sha"
@@ -271,10 +299,10 @@ git -C "$KERNEL_DIR" ls-files --others --exclude-standard > \
   "$PAHOLE" --version
   echo "UNTRACKED_SOURCE_LIST=untracked-sources.txt"
 } > "$OUT_DIR/artifacts/build-info.txt"
-cp "$OUT_DIR/nabu-a16.config" "$OUT_DIR/artifacts/nabu-a16.config"
+cp "$OUT_DIR/nabu-a17.config" "$OUT_DIR/artifacts/nabu-a17.config"
 (cd "$OUT_DIR/artifacts" && \
-  sha256sum Image.gz dtb dtbo.img dtbo-dump.txt build-info.txt \
-    nabu-a16.config untracked-sources.txt bk-zram-setup) > \
+  sha256sum Image.gz dtb dtbo.img dtbo-dump.txt btf-task_struct.txt \
+    build-info.txt nabu-a17.config untracked-sources.txt bk-zram-setup) > \
   "$OUT_DIR/artifacts/SHA256SUMS"
 stage "Package" "打包AnyKernel3包"
 package_path=$(KERNEL_DIR="$KERNEL_DIR" OUT_DIR="$OUT_DIR" \

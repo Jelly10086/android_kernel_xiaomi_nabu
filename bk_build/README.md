@@ -1,4 +1,4 @@
-# nabu Android 16 kernel build
+# nabu Android 17 kernel build
 
 The default entry point is `nabu_defconfig`. The scripts do not flash, reboot,
 change swap, or touch a connected device.
@@ -15,7 +15,7 @@ match the maintainer workstation. `nabu-perf_defconfig` is not a supported
 default because it does not select `CONFIG_MACH_XIAOMI_NABU`.
 
 Package names include the kernel release suffix:
-`bk-Kernel_nabu-A16-Hyper-R2.3w1-HHMMSS.zip`. The ZIP contains only
+`bk-Kernel_nabu-A17-Hyper-P1-HHMMSS.zip`. The ZIP contains only
 files consumed by the installer. Build metadata stays under `artifacts/`; CI
 generates the GitHub Release description after the build succeeds.
 

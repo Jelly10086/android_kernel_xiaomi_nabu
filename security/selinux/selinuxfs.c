@@ -119,7 +119,6 @@ static void selinux_fs_info_free(struct super_block *sb)
 #define SEL_INO_MASK			0x00ffffff
 
 #define TMPBUFLEN	12
-static bool selinux_permissive_locked;
 
 static ssize_t sel_read_enforce(struct file *filp, char __user *buf,
 				size_t count, loff_t *ppos)
@@ -160,13 +159,6 @@ static ssize_t sel_write_enforce(struct file *file, const char __user *buf,
 		goto out;
 
 	new_value = !!new_value;
-	/*
-	 * The legacy QSEE vendor services need the first-stage enforcing window.
-	 * Once userspace makes a real transition back to permissive, keep it
-	 * permissive for the rest of this boot.
-	 */
-	if (new_value && selinux_permissive_locked)
-		new_value = 0;
 
 	old_value = enforcing_enabled(state);
 	if (new_value != old_value) {
@@ -176,8 +168,6 @@ static ssize_t sel_write_enforce(struct file *file, const char __user *buf,
 				      NULL);
 		if (length)
 			goto out;
-		if (!new_value)
-			selinux_permissive_locked = true;
 		audit_log(current->audit_context, GFP_KERNEL, AUDIT_MAC_STATUS,
 			"enforcing=%d old_enforcing=%d auid=%u ses=%u",
 			new_value, old_value,

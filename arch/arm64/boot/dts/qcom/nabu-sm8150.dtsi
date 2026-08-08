@@ -606,6 +606,14 @@ And public attribution of xiaomi platforms(like J20S and so and)
 	qcom,panel-supply-entries = <&dsi_panel_pwr_supply_k82_vddio>;
 };
 
+&dsi_k81_42_02_0a_dual_cphy_video {
+	qcom,panel-supply-entries = <&dsi_panel_pwr_supply_k81_nabu>;
+};
+
+&dsi_k81_35_02_0b_dual_cphy_video {
+	qcom,panel-supply-entries = <&dsi_panel_pwr_supply_k81_nabu>;
+};
+
 &red_led {
 	label = "white";
 };

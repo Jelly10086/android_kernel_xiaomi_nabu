@@ -153,7 +153,7 @@ jobs:
         run: |
           set -euo pipefail
           package=$(find "$OUT_DIR/packages" -maxdepth 1 -type f \
-            -name 'bk-Kernel_nabu-A16-Hyper-*.zip' -print -quit)
+            -name 'bk-Kernel_nabu-A16-Hyper-R*-*.zip' -print -quit)
           test -n "$package"
           test -f "$package.sha256"
           unzip -t "$package" >/dev/null
@@ -182,9 +182,10 @@ jobs:
           CHECKSUM: ${{ steps.package.outputs.checksum }}
         run: |
           set -euo pipefail
+          package_name=$(basename "$PACKAGE" .zip)
           tag="$REQUESTED_TAG"
           if [[ -z "$tag" ]]; then
-            tag="bk-nabu-$(date -u +%Y%m%d-%H%M%S)"
+            tag="$package_name"
           fi
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "Release already exists: $tag" >&2
@@ -192,7 +193,7 @@ jobs:
           fi
           notes="${RUNNER_TEMP}/release-notes.md"
           {
-            echo "Kernel: 4.14.190_bk-Kernel_16.2-R2"
+            echo "Kernel: 4.14.190_bk-Kernel_16.2-R2.3"
             echo "Target: Xiaomi Pad 5 (nabu)"
             echo "Build: GitHub Actions run ${GITHUB_RUN_NUMBER}"
             echo "Commit: ${GITHUB_SHA}"
@@ -200,6 +201,6 @@ jobs:
           gh release create "$tag" "$PACKAGE" "$CHECKSUM" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "bk Kernel nabu A16 Hyper ${tag}" \
+            --title "$package_name" \
             --notes-file "$notes" \
             --latest

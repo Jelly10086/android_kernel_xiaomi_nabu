@@ -40,8 +40,24 @@ RECOVERY_DIR=$SCRIPT_DIR/recovery
 command -v zip >/dev/null 2>&1 || { echo "zip is required" >&2; exit 2; }
 command -v unzip >/dev/null 2>&1 || { echo "unzip is required" >&2; exit 2; }
 
-stamp=$(date -u +%Y%m%d-%H%M%S)
-PACKAGE="$PACKAGE_ROOT/bk-Kernel_nabu-A16-Hyper-$stamp"
+KERNEL_RELEASE=${KERNEL_RELEASE:-}
+if [ -z "$KERNEL_RELEASE" ]; then
+  [ -r "$OUT_DIR/include/config/kernel.release" ] || {
+    echo "kernel release metadata is missing" >&2; exit 2;
+  }
+  IFS= read -r KERNEL_RELEASE < "$OUT_DIR/include/config/kernel.release"
+fi
+KERNEL_SUFFIX=${KERNEL_RELEASE##*-}
+[ "$KERNEL_SUFFIX" != "$KERNEL_RELEASE" ] || {
+  echo "kernel release has no package suffix: $KERNEL_RELEASE" >&2; exit 2;
+}
+case "$KERNEL_SUFFIX" in
+  ''|*[!A-Za-z0-9._-]*)
+    echo "invalid package suffix: $KERNEL_SUFFIX" >&2; exit 2 ;;
+esac
+
+stamp=$(date -u +%H%M%S)
+PACKAGE="$PACKAGE_ROOT/bk-Kernel_nabu-A16-Hyper-$KERNEL_SUFFIX-$stamp"
 ZIP_PATH="$PACKAGE.zip"
 [ ! -e "$PACKAGE" ] && [ ! -e "$ZIP_PATH" ] || { echo "package already exists: $PACKAGE" >&2; exit 1; }
 mkdir -p "$PACKAGE"
@@ -50,25 +66,16 @@ cp "$ARTIFACTS/dtb" "$PACKAGE/dtb"
 cp "$ARTIFACTS/dtbo.img" "$PACKAGE/dtbo.img"
 cp "$TEMPLATE" "$PACKAGE/anykernel.sh"
 chmod 0755 "$PACKAGE/anykernel.sh"
-cp -a "$ANYKERNEL_TOOLS" "$PACKAGE/tools"
+mkdir -p "$PACKAGE/tools" "$PACKAGE/recovery"
+for tool in ak3-core.sh busybox magiskboot bk-reburnout.sh \
+  bk-zram-writeback.sh; do
+  cp "$ANYKERNEL_TOOLS/$tool" "$PACKAGE/tools/$tool"
+done
 cp "$ARTIFACTS/bk-zram-setup" "$PACKAGE/tools/bk-zram-setup"
 chmod 0755 "$PACKAGE/tools/bk-zram-setup"
 cp -a "$ANYKERNEL_META_INF" "$PACKAGE/META-INF"
-cp -a "$RECOVERY_DIR" "$PACKAGE/recovery"
-[ -f "$ARTIFACTS/build-info.txt" ] && cp "$ARTIFACTS/build-info.txt" "$PACKAGE/build-info.txt" || true
-[ -f "$ARTIFACTS/SHA256SUMS" ] && cp "$ARTIFACTS/SHA256SUMS" "$PACKAGE/SHA256SUMS" || true
-
-cat > "$PACKAGE/README.txt" <<EOF
-Target: Xiaomi nabu
-Kernel image: Image.gz
-Device trees: sm8150, sm8150p, sm8150p-v2, sm8150-v2 (concatenated as dtb)
-Overlay image: dtbo.img
-Boot/vendor_boot: handled separately by anykernel.sh.
-Required base: boot image matching the installed system; PBRP fastboot boot images are rejected.
-Recovery: embedded PBRP 4.0 (TWRP 3.7.1_12), installed into the active boot ramdisk.
-Runtime policy: Re.burnout-mode is installed through KernelSU service.d on decrypted /data.
-ZRAM writeback: 1 GiB per-boot backing device with a 512 MiB boot budget.
-EOF
+cp "$RECOVERY_DIR/ramdisk-recovery.cpio.gz" \
+  "$PACKAGE/recovery/ramdisk-recovery.cpio.gz"
 (cd "$PACKAGE" && zip -qr9 "$ZIP_PATH" .)
 unzip -t "$ZIP_PATH" >/dev/null
 for entry in Image.gz dtb dtbo.img anykernel.sh tools/ak3-core.sh \
@@ -80,6 +87,19 @@ for entry in Image.gz dtb dtbo.img anykernel.sh tools/ak3-core.sh \
     echo "package entry missing: $entry" >&2; exit 1;
   }
 done
+actual_files=$(unzip -Z1 "$ZIP_PATH" | grep -v '/$' | LC_ALL=C sort)
+expected_files=$(printf '%s\n' \
+  Image.gz anykernel.sh dtb dtbo.img \
+  META-INF/com/google/android/update-binary \
+  META-INF/com/google/android/updater-script \
+  recovery/ramdisk-recovery.cpio.gz \
+  tools/ak3-core.sh tools/bk-reburnout.sh tools/bk-zram-setup \
+  tools/bk-zram-writeback.sh tools/busybox tools/magiskboot | LC_ALL=C sort)
+[ "$actual_files" = "$expected_files" ] || {
+  echo "package contains unexpected or missing files" >&2
+  printf '%s\n' "$actual_files" >&2
+  exit 1
+}
 unzip -p "$ZIP_PATH" anykernel.sh | grep -Fx 'device.name1=nabu' >/dev/null || {
   echo "AnyKernel target is not nabu" >&2; exit 1;
 }
@@ -122,12 +142,28 @@ unzip -p "$ZIP_PATH" anykernel.sh | \
     echo "PBRP installer checksum is missing" >&2; exit 1;
   }
 unzip -p "$ZIP_PATH" tools/bk-reburnout.sh | \
-  grep -F 'reb_write /proc/sys/vm/swappiness 180' >/dev/null || {
-    echo "swappiness 180 policy is missing" >&2; exit 1;
+  grep -F 'reb_write /proc/sys/vm/swappiness 200' >/dev/null || {
+    echo "swappiness 200 policy is missing" >&2; exit 1;
+  }
+unzip -p "$ZIP_PATH" tools/bk-reburnout.sh | \
+  grep -Fx 'REB_WB_FLUSH_SAMPLES=12' >/dev/null || {
+    echo "one-minute zram writeback policy is missing" >&2; exit 1;
   }
 unzip -p "$ZIP_PATH" tools/bk-reburnout.sh | \
   grep -F 'reb_write /dev/cpuset/foreground/cpus 0-2,4-7' >/dev/null || {
     echo "foreground cpuset policy is missing" >&2; exit 1;
+  }
+unzip -p "$ZIP_PATH" tools/bk-reburnout.sh | \
+  grep -F 'reb_write /dev/cpuset/top-app/cpus 4-7' >/dev/null || {
+    echo "top-app cpuset policy is missing" >&2; exit 1;
+  }
+unzip -p "$ZIP_PATH" tools/bk-reburnout.sh | \
+  grep -F 'reb_refresh_top_app()' >/dev/null || {
+    echo "top-app affinity refresh is missing" >&2; exit 1;
+  }
+unzip -p "$ZIP_PATH" tools/bk-reburnout.sh | \
+  grep -F 'taskset -p 70 "$REB_PROCESS_PID"' >/dev/null || {
+    echo "launcher CPU4-6 policy is missing" >&2; exit 1;
   }
 LEGACY_KERNEL_NAME=$(printf '\115\141\150\151\162\157')
 if unzip -p "$ZIP_PATH" anykernel.sh | grep -F "$LEGACY_KERNEL_NAME" >/dev/null; then

@@ -74,20 +74,19 @@ stage()
   printf '\n[%s] %s\n' "$1" "$2"
 }
 
-stage "配置" "内核目录：$KERNEL_DIR"
+stage "Config" "内核目录：$KERNEL_DIR"
 printf '输出目录：%s\n配置文件：%s\n并行任务：%s\n' \
   "$OUT_DIR" "$DEFCONFIG" "$JOBS"
 printf 'ThinLTO 磁盘缓存：%s\n' "$([ "$DISABLE_LTO_CACHE" = 1 ] && echo 关闭 || echo 开启)"
 printf 'ccache：%s\n' "$([ -n "$CCACHE" ] && echo 开启 || echo 关闭)"
 
-# The nabu defconfig is the only default entry point.  The fragment is merged
-# after defconfig and normalized by olddefconfig so dependencies are resolved.
-stage "配置" "生成内核配置"
+# Merge the feature fragment after nabu_defconfig, then resolve dependencies.
+stage "Config" "生成内核配置"
 make_kernel "$DEFCONFIG"
 KCONFIG_CONFIG="$OUT_DIR/.config" "$KERNEL_DIR/scripts/kconfig/merge_config.sh" -m \
   "$OUT_DIR/.config" "$FRAGMENT"
 make_kernel olddefconfig
-stage "检查" "核对必要选项"
+stage "Check" "核对必要选项"
 for symbol in MACH_XIAOMI_NABU BPF BPF_SYSCALL BPF_JIT BPF_JIT_ALWAYS_ON \
   BPF_EVENTS CGROUPS MEMCG CGROUP_SCHED CGROUP_FREEZER CGROUP_CPUACCT \
   CGROUP_BPF CGROUP_DEVICE CGROUP_PIDS CGROUP_NET_PRIO CPUSETS PSI \
@@ -137,11 +136,8 @@ grep -qx 'CONFIG_CMDLINE=""' "$OUT_DIR/.config" || {
 }
 cp "$OUT_DIR/.config" "$OUT_DIR/nabu-a16.config"
 
-# Compile the integration-sensitive objects before the full image build.
-stage "编译" "对象"
-# KernelSU includes generated/compile.h and SELinux generated policy headers.
-# Build their normal owners first so a clean output directory cannot race the
-# parallel object-only invocation.
+# Build generated-header owners before the parallel object batch.
+stage "Build" "编译内核对象"
 make_kernel init/version.o
 make_kernel -j"$JOBS" security/selinux/
 make_kernel -j"$JOBS" \
@@ -162,14 +158,13 @@ make_kernel -j"$JOBS" \
   kernel/events/core.o kernel/trace/trace.o kernel/trace/trace_events.o \
   kernel/trace/trace_output.o
 
-# DTBO_OBJS is discovered when make parses arch/arm64/boot/Makefile.  Build
-# the overlays first, then start a new make invocation so dtbo.img sees them.
-stage "编译" "Image.gz 与设备树"
+# Re-enter make after compiling overlays so DTBO_OBJS is evaluated again.
+stage "Build" "编译Image.gz+设备树"
 make_kernel -j"$JOBS" Image.gz dtbs
-stage "生成" "dtbo.img"
+stage "Build" "生成dtbo.img"
 make_kernel -j"$JOBS" dtbo.img
 
-stage "校验" "Image、BTF、DTB、DTBO"
+stage "Check" "校验Image / BTF / DTB / DTBO"
 BOOT="$OUT_DIR/arch/$ARCH/boot"
 DTB_ROOT="$BOOT/dts/qcom"
 mkdir -p "$OUT_DIR/artifacts"
@@ -193,7 +188,15 @@ for name in sm8150 sm8150p sm8150p-v2 sm8150-v2; do
     echo "invalid FDT magic: $name.dtb" >&2; exit 1;
   }
 done
-# Keep the order used by the known-working nabu AOSP AnyKernel package.
+NABU_DTBO="$DTB_ROOT/nabu-sm8150-overlay.dtbo"
+[ -f "$NABU_DTBO" ] || { echo "missing nabu-sm8150-overlay.dtbo" >&2; exit 1; }
+for panel in dsi_k81_42_02_0a_dual_cphy_vid_display \
+  dsi_k81_35_02_0b_dual_cphy_vid_display; do
+  strings "$NABU_DTBO" | grep -Fx "$panel" >/dev/null || {
+    echo "missing Pad 5 Pro panel in nabu overlay: $panel" >&2; exit 1;
+  }
+done
+# Match the HyperOS vendor_boot DTB order.
 cat "$DTB_ROOT/sm8150.dtb" "$DTB_ROOT/sm8150p.dtb" \
   "$DTB_ROOT/sm8150p-v2.dtb" "$DTB_ROOT/sm8150-v2.dtb" > "$OUT_DIR/artifacts/dtb"
 cp "$BOOT/dtbo.img" "$OUT_DIR/artifacts/dtbo.img"
@@ -207,11 +210,11 @@ python3 "$KERNEL_DIR/scripts/dtc/libfdt/mkdtboimg.py" \
   echo "vmlinux has no .BTF section" >&2; exit 1;
 }
 kernel_release=$(make_kernel -s kernelrelease)
-[ "$kernel_release" = "4.14.190_bk-Kernel_16.2-R2" ] || {
+[ "$kernel_release" = "4.14.190_bk-Kernel_16.2-R2.3" ] || {
   echo "unexpected kernel release: $kernel_release" >&2; exit 1;
 }
 
-stage "生成" "ZRAM 回写助手"
+stage "Generate" "生成bk-ZRAM_Tool"
 "$CLANG_DIR/bin/clang" --target=aarch64-linux-android \
   -Oz -ffreestanding -fno-builtin -fno-stack-protector \
   -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-pie \
@@ -273,9 +276,12 @@ cp "$OUT_DIR/nabu-a16.config" "$OUT_DIR/artifacts/nabu-a16.config"
   sha256sum Image.gz dtb dtbo.img dtbo-dump.txt build-info.txt \
     nabu-a16.config untracked-sources.txt bk-zram-setup) > \
   "$OUT_DIR/artifacts/SHA256SUMS"
-stage "打包" "生成 AnyKernel"
-package_path=$(KERNEL_DIR="$KERNEL_DIR" OUT_DIR="$OUT_DIR" "$SCRIPT_DIR/pack.sh")
+stage "Package" "打包AnyKernel3包"
+package_path=$(KERNEL_DIR="$KERNEL_DIR" OUT_DIR="$OUT_DIR" \
+  KERNEL_RELEASE="$kernel_release" "$SCRIPT_DIR/pack.sh")
 package_sha=$(sha256sum "$package_path" | awk '{print $1}')
-stage "Done" "构建打包Pass"
-printf '内核版本：%s\n产物目录：%s/artifacts\n包体：%s\nSHA256：%s\n' \
-  "$kernel_release" "$OUT_DIR" "$package_path" "$package_sha"
+stage "Done" "构建与打包通过"
+printf '[Artifact] 内核版本 : %s\n' "$kernel_release"
+printf '[Artifact] 产物目录 : %s/artifacts\n' "$OUT_DIR"
+printf '[Artifact] 安装包   : %s\n' "$package_path"
+printf '[Artifact] SHA256   : %s\n' "$package_sha"

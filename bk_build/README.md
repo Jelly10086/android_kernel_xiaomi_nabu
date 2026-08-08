@@ -14,6 +14,11 @@ builds the kernel and then creates and validates the AnyKernel package from
 match the maintainer workstation. `nabu-perf_defconfig` is not a supported
 default because it does not select `CONFIG_MACH_XIAOMI_NABU`.
 
+Package names include the kernel release suffix:
+`bk-Kernel_nabu-A16-Hyper-R2.3-HHMMSS.zip`. The ZIP contains only
+files consumed by the installer. Build metadata stays under `artifacts/`; CI
+generates the GitHub Release description after the build succeeds.
+
 GitHub Actions uses the same script with pinned toolchains. The
 `Build and release nabu kernel` workflow is started manually and publishes
 the validated ZIP plus its SHA256 file to GitHub Releases after a successful
@@ -34,17 +39,19 @@ stock HyperOS boot header. The source ZIP and ramdisk hashes are recorded in
 `bk_build/recovery/README.md` and in every build's `build-info.txt`.
 
 The installer also places `bk-reburnout.sh` in KernelSU `service.d`. It applies
-the nabu cpuset layout and swappiness 180, pins SystemUI, MIUI Home, and the
-display composer to CPUs 4-7, and enables `Re.burnout-mode` only after a
-sustained CPU/GPU load. The mode raises CPU, GPU, UFS, DDR, LLCC, and GPU-bus
-performance requests, exits on sustained low load or 80 C, and restores every
-saved sysfs value. Create `/data/adb/bk-kernel/Re.burnout-mode.disabled` to
-disable the dynamic mode; write `1`, `0`, or `auto` to
-`Re.burnout-mode.force` for validation.
+the nabu cpuset layout and swappiness 200, pins SystemUI and the display
+composer to CPUs 4-7, and keeps the launcher main/rendering threads on CPUs
+4-6 with CPU7 available to auxiliary workers. It enables `Re.burnout-mode`
+only after a sustained CPU/GPU load. The mode raises CPU, GPU, UFS, DDR, LLCC,
+and GPU-bus performance requests, exits on sustained low load or 80 C, and
+restores every saved sysfs value. Create
+`/data/adb/bk-kernel/Re.burnout-mode.disabled` to disable the dynamic mode;
+write `1`, `0`, or `auto` to `Re.burnout-mode.force` for validation.
 
 The installer also configures a 1 GiB zram backing loop from Android's
 `/data/per_boot` area. HyperOS can initialize zram before that encrypted path
 and a free loop node are ready, so the kernel permits only the first missing
 backing device to be attached later without resetting active swap. Direct I/O
-and a 512 MiB per-boot writeback budget limit flash wear. Idle pages are marked
-and written back only after the display has remained off for one hour.
+and a 512 MiB per-boot writeback budget limit flash wear. Incompressible pages
+are written back when the display turns off; normal idle pages are written back
+after one minute of continuous screen-off time.

@@ -147,6 +147,7 @@ make_kernel -j"$JOBS" \
   kernel/bpf/xskmap_compat.o net/core/bpf_sk_storage.o \
   net/core/filter.o kernel/bpf/cgroup.o net/ipv4/udp.o net/ipv6/udp.o \
   drivers/devfreq/bimc-bwmon.o \
+  drivers/extcon/extcon.o \
   drivers/kernelsu/ksu.o \
   arch/arm64/kernel/setup.o arch/arm64/kernel/cpu_errata.o \
   arch/arm64/net/bpf_jit_comp.o fs/pstore/ram.o fs/pstore/platform.o \

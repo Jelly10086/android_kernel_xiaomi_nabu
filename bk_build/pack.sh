@@ -142,8 +142,8 @@ unzip -p "$ZIP_PATH" anykernel.sh | \
     echo "PBRP installer checksum is missing" >&2; exit 1;
   }
 unzip -p "$ZIP_PATH" tools/bk-reburnout.sh | \
-  grep -F 'reb_write /proc/sys/vm/swappiness 200' >/dev/null || {
-    echo "swappiness 200 policy is missing" >&2; exit 1;
+  grep -F 'reb_write /proc/sys/vm/swappiness 180' >/dev/null || {
+    echo "swappiness 180 policy is missing" >&2; exit 1;
   }
 unzip -p "$ZIP_PATH" tools/bk-reburnout.sh | \
   grep -Fx 'REB_WB_FLUSH_SAMPLES=12' >/dev/null || {
@@ -154,20 +154,28 @@ unzip -p "$ZIP_PATH" tools/bk-reburnout.sh | \
     echo "daily zram writeback budget is missing" >&2; exit 1;
   }
 unzip -p "$ZIP_PATH" tools/bk-reburnout.sh | \
-  grep -F 'reb_write /dev/cpuset/foreground/cpus 0-2,4-7' >/dev/null || {
+  grep -F 'reb_write /dev/cpuset/foreground/cpus 0-7' >/dev/null || {
     echo "foreground cpuset policy is missing" >&2; exit 1;
   }
 unzip -p "$ZIP_PATH" tools/bk-reburnout.sh | \
-  grep -F 'reb_write /dev/cpuset/top-app/cpus 4-7' >/dev/null || {
+  grep -F 'reb_write /dev/cpuset/top-app/cpus 0-7' >/dev/null || {
     echo "top-app cpuset policy is missing" >&2; exit 1;
   }
 unzip -p "$ZIP_PATH" tools/bk-reburnout.sh | \
-  grep -F 'reb_refresh_top_app()' >/dev/null || {
-    echo "top-app affinity refresh is missing" >&2; exit 1;
+  grep -F 'reb_top_thread_is_heavy()' >/dev/null || {
+    echo "top-app heavy-thread policy is missing" >&2; exit 1;
   }
 unzip -p "$ZIP_PATH" tools/bk-reburnout.sh | \
-  grep -F 'taskset -p 70 "$REB_PROCESS_PID"' >/dev/null || {
-    echo "launcher CPU4-6 policy is missing" >&2; exit 1;
+  grep -F 'reb_sample_top_cpu()' >/dev/null || {
+    echo "top-app CPU sampling is missing" >&2; exit 1;
+  }
+unzip -p "$ZIP_PATH" tools/bk-reburnout.sh | \
+  grep -F 'taskset -p f0 "$REB_PROCESS_PID"' >/dev/null || {
+    echo "launcher heavy-thread policy is missing" >&2; exit 1;
+  }
+unzip -p "$ZIP_PATH" tools/bk-reburnout.sh | \
+  grep -F 'SurfaceSyncGrou|AnimThread*|FsGestureSecond)' >/dev/null || {
+    echo "launcher heavy-thread list is missing" >&2; exit 1;
   }
 LEGACY_KERNEL_NAME=$(printf '\115\141\150\151\162\157')
 if unzip -p "$ZIP_PATH" anykernel.sh | grep -F "$LEGACY_KERNEL_NAME" >/dev/null; then

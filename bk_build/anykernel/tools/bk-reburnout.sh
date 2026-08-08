@@ -19,6 +19,9 @@ REB_PINNED_FILE=$REB_DIR/Re.burnout-mode.top-app
 REB_PINNED_TMP=$REB_DIR/Re.burnout-mode.top-app.tmp
 REB_UI_TIDS_FILE=$REB_DIR/Re.burnout-mode.ui-tids
 REB_UI_TIDS_TMP=$REB_DIR/Re.burnout-mode.ui-tids.tmp
+REB_TOP_CPU_FILE=/dev/.bk-reburnout-top-cpu
+REB_TOP_CPU_TMP=/dev/.bk-reburnout-top-cpu.tmp
+REB_TOP_CPU_SORTED=/dev/.bk-reburnout-top-cpu.sorted
 REB_INTERVAL=5
 REB_ENTER_SAMPLES=6
 REB_EXIT_SAMPLES=12
@@ -63,19 +66,19 @@ reb_apply_cpuset()
 {
 	reb_write /dev/cpuset/background/cpus 0-2
 	reb_write /dev/cpuset/system-background/cpus 0-3
-	reb_write /dev/cpuset/foreground/cpus 0-2,4-7
-	reb_write /dev/cpuset/top-app/cpus 4-7
+	reb_write /dev/cpuset/foreground/cpus 0-7
+	reb_write /dev/cpuset/top-app/cpus 0-7
 }
 
 reb_apply_swappiness()
 {
-	reb_write /proc/sys/vm/swappiness 200
+	reb_write /proc/sys/vm/swappiness 180
 	for REB_SWAPPINESS_NODE in \
 		/dev/memcg/memory.swappiness \
 		/dev/memcg/apps/memory.swappiness \
 		/dev/memcg/system/memory.swappiness \
 		/sys/fs/cgroup/bg/memory.swappiness; do
-		reb_write "$REB_SWAPPINESS_NODE" 200
+		reb_write "$REB_SWAPPINESS_NODE" 180
 	done
 }
 
@@ -278,24 +281,27 @@ reb_pin_home()
 			REB_HOME_REFRESH=1
 		fi
 		reb_read_allowed_list "$REB_PROCESS_PID"
-		[ "$REB_ALLOWED_LIST" = "4-6" ] || REB_HOME_REFRESH=1
+		[ "$REB_ALLOWED_LIST" = "4-7" ] || REB_HOME_REFRESH=1
 	done
 	if [ "$REB_HOME_PIDS" != "$REB_LAST_HOME_PIDS" ] || \
 	   [ "$REB_HOME_TASK_COUNT" -ne "$REB_LAST_HOME_TASK_COUNT" ]; then
 		REB_HOME_REFRESH=1
 	fi
-	[ "$REB_HOME_REFRESH" -eq 1 ] || return 0
 	for REB_PROCESS_PID in $REB_HOME_PIDS; do
-		# Keep CPU7 available to auxiliary launcher workers.
-		taskset -ap f0 "$REB_PROCESS_PID" >/dev/null 2>&1 || true
-		taskset -p 70 "$REB_PROCESS_PID" >/dev/null 2>&1 || true
+		if [ "$REB_HOME_REFRESH" -eq 1 ]; then
+			taskset -ap ff "$REB_PROCESS_PID" >/dev/null 2>&1 || true
+			taskset -p f0 "$REB_PROCESS_PID" >/dev/null 2>&1 || true
+		fi
 		for REB_HOME_TASK in /proc/$REB_PROCESS_PID/task/*; do
 			[ -r "$REB_HOME_TASK/comm" ] || continue
 			REB_HOME_COMM=
 			IFS= read -r REB_HOME_COMM < "$REB_HOME_TASK/comm" 2>/dev/null || true
 			case "$REB_HOME_COMM" in
-				RenderThread|HwuiTask*|launcher*|Launcher*)
-					taskset -p 70 "${REB_HOME_TASK##*/}" >/dev/null 2>&1 || true
+				RenderThread|HwuiTask*|hwuiTask*|HomeShellAnim|\
+				SurfaceSyncGrou|AnimThread*|FsGestureSecond)
+					reb_read_allowed_list "${REB_HOME_TASK##*/}"
+					[ "$REB_ALLOWED_LIST" = "4-7" ] || \
+						taskset -p f0 "${REB_HOME_TASK##*/}" >/dev/null 2>&1 || true
 					;;
 			esac
 		done
@@ -325,11 +331,13 @@ reb_tune_transition_threads()
 	   [ "$REB_SYSTEMUI_TASK_COUNT" -ne "$REB_LAST_SYSTEMUI_TASK_COUNT" ]; then
 		REB_SYSTEMUI_REFRESH=1
 	fi
-	[ "$REB_SYSTEMUI_REFRESH" -eq 1 ] || return 0
-	for REB_PROCESS_PID in $REB_SYSTEMUI_PIDS; do
-		taskset -ap f0 "$REB_PROCESS_PID" >/dev/null 2>&1 || true
-	done
-	rm -f "$REB_UI_TIDS_FILE" "$REB_UI_TIDS_TMP"
+	if [ "$REB_SYSTEMUI_REFRESH" -eq 1 ]; then
+		for REB_PROCESS_PID in $REB_SYSTEMUI_PIDS; do
+			taskset -ap ff "$REB_PROCESS_PID" >/dev/null 2>&1 || true
+			taskset -p f0 "$REB_PROCESS_PID" >/dev/null 2>&1 || true
+		done
+		rm -f "$REB_UI_TIDS_FILE" "$REB_UI_TIDS_TMP"
+	fi
 
 	: > "$REB_UI_TIDS_TMP"
 	for REB_PROCESS_PID in $REB_SYSTEMUI_PIDS; do
@@ -339,7 +347,8 @@ reb_tune_transition_threads()
 			REB_UI_COMM=
 			IFS= read -r REB_UI_COMM < "$REB_TASK/comm" 2>/dev/null || true
 			case "$REB_UI_COMM" in
-				wmshell.main|wmshell.anim|miui_wm_sight|doUnLockAppAnim|SurfaceSyncGrou) ;;
+				wmshell.main|wmshell.anim|miui_wm_sight|doUnLockAppAnim|\
+				SurfaceSyncGrou|RenderThread|ControlCenterTr) ;;
 				*) continue ;;
 			esac
 			printf '%s\n' "$REB_UI_TID" >> "$REB_UI_TIDS_TMP"
@@ -372,31 +381,83 @@ reb_apply_base()
 	reb_pin_ui
 }
 
-reb_home_primary_tid()
+reb_read_tid_identity()
 {
-	for REB_HOME_PID in $REB_HOME_PIDS; do
-		[ "$1" = "$REB_HOME_PID" ] && return 0
-	done
-	[ -r "/proc/$1/comm" ] || return 1
-	REB_HOME_COMM=
-	IFS= read -r REB_HOME_COMM < "/proc/$1/comm" 2>/dev/null || return 1
-	case "$REB_HOME_COMM" in
-		RenderThread|HwuiTask*|launcher*|Launcher*) ;;
-		*) return 1 ;;
-	esac
-	REB_TASK_TGID=
+	REB_TOP_TGID=
+	REB_TOP_COMM=
+	[ -r "/proc/$1/status" ] && [ -r "/proc/$1/comm" ] || return 1
+	IFS= read -r REB_TOP_COMM < "/proc/$1/comm" 2>/dev/null || return 1
 	while IFS= read -r REB_STATUS_LINE; do
 		case "$REB_STATUS_LINE" in
 			Tgid:*)
-				REB_TASK_TGID=${REB_STATUS_LINE#*:}
-				set -- $REB_TASK_TGID
-				REB_TASK_TGID=${1:-}
+				REB_TOP_TGID=${REB_STATUS_LINE#*:}
+				set -- $REB_TOP_TGID
+				REB_TOP_TGID=${1:-}
 				break
 				;;
 		esac
 	done < "/proc/$1/status"
-	for REB_HOME_PID in $REB_HOME_PIDS; do
-		[ "$REB_TASK_TGID" = "$REB_HOME_PID" ] && return 0
+	case "$REB_TOP_TGID" in ''|*[!0-9]*) return 1 ;; esac
+	return 0
+}
+
+reb_managed_ui_tgid()
+{
+	for REB_UI_PID in $REB_HOME_PIDS $REB_SYSTEMUI_PIDS $REB_COMPOSER_PIDS; do
+		[ "$1" = "$REB_UI_PID" ] && return 0
+	done
+	return 1
+}
+
+reb_top_thread_is_heavy()
+{
+	[ "$REB_TOP_TID" = "$REB_TOP_TGID" ] && return 0
+	case "$REB_TOP_COMM" in
+		RenderThread|HwuiTask*|hwuiTask*|GLThread*|UnityMain|\
+		UnityGfxDeviceW|GameThread|RHIThread|UE4|UnrealThread*|\
+		GLES*|Vulkan*|VkThread*) return 0 ;;
+	esac
+	return 1
+}
+
+reb_read_cpu_jiffies()
+{
+	REB_TOP_STAT=
+	REB_TOP_JIFFIES=
+	IFS= read -r REB_TOP_STAT < "/proc/$1/task/$2/stat" 2>/dev/null || return 1
+	REB_TOP_STAT=${REB_TOP_STAT#*) }
+	set -- $REB_TOP_STAT
+	[ "$#" -ge 13 ] || return 1
+	case "${12}" in ''|*[!0-9]*) return 1 ;; esac
+	case "${13}" in ''|*[!0-9]*) return 1 ;; esac
+	REB_TOP_JIFFIES=$((${12} + ${13}))
+}
+
+reb_sample_top_cpu()
+{
+	REB_TOP_CPU_TIDS=
+	: > "$REB_TOP_CPU_TMP"
+	while IFS= read -r REB_TOP_TID; do
+		case "$REB_TOP_TID" in ''|*[!0-9]*) continue ;; esac
+		reb_read_tid_identity "$REB_TOP_TID" || continue
+		reb_managed_ui_tgid "$REB_TOP_TGID" && continue
+		reb_read_cpu_jiffies "$REB_TOP_TGID" "$REB_TOP_TID" || continue
+		printf '%s %s\n' "$REB_TOP_TID" "$REB_TOP_JIFFIES" >> "$REB_TOP_CPU_TMP"
+	done < /dev/cpuset/top-app/tasks
+	sort -n "$REB_TOP_CPU_TMP" > "$REB_TOP_CPU_SORTED"
+	if [ -s "$REB_TOP_CPU_FILE" ]; then
+		REB_TOP_CPU_TIDS=$(awk 'NR == FNR { old[$1] = $2; next }
+			($1 in old) && $2 > old[$1] { print $2 - old[$1], $1 }' \
+			"$REB_TOP_CPU_FILE" "$REB_TOP_CPU_SORTED" | \
+			sort -nr | head -n 2 | awk '{ print $2 }')
+	fi
+	mv -f "$REB_TOP_CPU_SORTED" "$REB_TOP_CPU_FILE"
+}
+
+reb_tid_is_cpu_heavy()
+{
+	for REB_CPU_TID in $REB_TOP_CPU_TIDS; do
+		[ "$1" = "$REB_CPU_TID" ] && return 0
 	done
 	return 1
 }
@@ -404,19 +465,42 @@ reb_home_primary_tid()
 reb_refresh_top_app()
 {
 	[ -r /dev/cpuset/top-app/tasks ] || return 0
+	reb_sample_top_cpu
+	: > "$REB_PINNED_TMP"
 	while IFS= read -r REB_TOP_TID; do
 		case "$REB_TOP_TID" in ''|*[!0-9]*) continue ;; esac
-		reb_home_primary_tid "$REB_TOP_TID" && continue
+		reb_read_tid_identity "$REB_TOP_TID" || continue
+		reb_managed_ui_tgid "$REB_TOP_TGID" && continue
+		reb_top_thread_is_heavy || \
+			reb_tid_is_cpu_heavy "$REB_TOP_TID" || continue
 		reb_read_allowed_list "$REB_TOP_TID"
 		[ "$REB_ALLOWED_LIST" = "4-7" ] || \
-			taskset -p f0 "$REB_TOP_TID" >/dev/null 2>&1 || true
+			taskset -p f0 "$REB_TOP_TID" >/dev/null 2>&1 || continue
+		printf '%s\n' "$REB_TOP_TID" >> "$REB_PINNED_TMP"
 	done < /dev/cpuset/top-app/tasks
+	if [ -r "$REB_PINNED_FILE" ]; then
+		while IFS= read -r REB_OLD_TID; do
+			case "$REB_OLD_TID" in ''|*[!0-9]*) continue ;; esac
+			grep -qx "$REB_OLD_TID" "$REB_PINNED_TMP" 2>/dev/null && continue
+			[ -d "/proc/$REB_OLD_TID" ] && \
+				taskset -p ff "$REB_OLD_TID" >/dev/null 2>&1 || true
+		done < "$REB_PINNED_FILE"
+	fi
+	mv -f "$REB_PINNED_TMP" "$REB_PINNED_FILE"
 }
 
 reb_restore_top_app()
 {
+	if [ -r "$REB_PINNED_FILE" ]; then
+		while IFS= read -r REB_TOP_TID; do
+			case "$REB_TOP_TID" in ''|*[!0-9]*) continue ;; esac
+			[ -d "/proc/$REB_TOP_TID" ] && \
+				taskset -p ff "$REB_TOP_TID" >/dev/null 2>&1 || true
+		done < "$REB_PINNED_FILE"
+	fi
 	rm -f "$REB_PINNED_FILE" "$REB_PINNED_TMP"
 	rm -f "$REB_UI_TIDS_FILE" "$REB_UI_TIDS_TMP"
+	rm -f "$REB_TOP_CPU_FILE" "$REB_TOP_CPU_TMP" "$REB_TOP_CPU_SORTED"
 	reb_pin_ui
 }
 
@@ -636,7 +720,7 @@ REB_LAST_SYSTEMUI_TASK_COUNT=-1
 trap 'reb_cleanup' EXIT HUP INT TERM
 
 case "$(uname -r)" in
-	4.14.190_bk-Kernel_16.2-R2.3) ;;
+	4.14.190_bk-Kernel_16.2-R2.3w1) ;;
 	*) reb_log "ignored on incompatible kernel $(uname -r)"; exit 0 ;;
 esac
 

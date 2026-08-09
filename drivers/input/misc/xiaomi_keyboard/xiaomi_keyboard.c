@@ -12,6 +12,7 @@
 #include <linux/of.h>
 #include <linux/slab.h>
 #include <linux/device.h>
+#include <linux/usb.h>
 #include "xiaomi_keyboard.h"
 #include <linux/msm_drm_notify.h>
 #include <linux/notifier.h>
@@ -32,10 +33,13 @@ static void xiaomi_keyboard_reset(void)
 	gpio_direction_output(mdata->pdata->rst_gpio, 1);
 }
 
-static void xiaomi_keyboard_connected_notify(struct device *dev)
+static void xiaomi_keyboard_connected_notify(struct xiaomi_keyboard_data *data)
 {
-	sysfs_notify(&dev->kobj, NULL, "xiaomi_keyboard_conn_status");
-	sysfs_notify(&dev->kobj, NULL, "xiaomi_keyboard_connected");
+	if (!data->pdata->generic_input)
+		sysfs_notify(&data->pdev->dev.kobj, NULL,
+			     "xiaomi_keyboard_conn_status");
+	sysfs_notify(&data->pdev->dev.kobj, NULL,
+		     "xiaomi_keyboard_connected");
 }
 
 static void xiaomi_keyboard_set_connected(struct xiaomi_keyboard_data *data,
@@ -50,43 +54,26 @@ static void xiaomi_keyboard_set_connected(struct xiaomi_keyboard_data *data,
 	mutex_unlock(&data->rw_mutex);
 
 	if (changed) {
-		xiaomi_keyboard_connected_notify(&data->pdev->dev);
+		xiaomi_keyboard_connected_notify(data);
 		MI_KB_INFO("keyboard connected status: %d\n", connected);
 	}
 }
 
-static bool xiaomi_keyboard_toggle_connected(struct xiaomi_keyboard_data *data)
+static int xiaomi_keyboard_usb_event(struct notifier_block *self,
+				     unsigned long action, void *usb_data)
 {
-	bool connected;
+	struct xiaomi_keyboard_data *data = container_of(self,
+			struct xiaomi_keyboard_data, usb_notifier);
+	struct usb_device *udev = usb_data;
 
-	mutex_lock(&data->rw_mutex);
-	connected = !data->keyboard_is_connected;
-	data->keyboard_is_connected = connected;
-	data->keyboard_conn_status = connected;
-	mutex_unlock(&data->rw_mutex);
+	if (action != USB_DEVICE_ADD && action != USB_DEVICE_REMOVE)
+		return NOTIFY_DONE;
+	if (le16_to_cpu(udev->descriptor.idVendor) != 0x3206 ||
+	    le16_to_cpu(udev->descriptor.idProduct) != 0x3ffc)
+		return NOTIFY_DONE;
 
-	xiaomi_keyboard_connected_notify(&data->pdev->dev);
-	MI_KB_INFO("keyboard connected status: %d\n", connected);
-	return connected;
-}
-
-static void xiaomi_keyboard_connection_work(struct work_struct *work)
-{
-	struct xiaomi_keyboard_data *data = container_of(to_delayed_work(work),
-			struct xiaomi_keyboard_data, connection_work);
-	unsigned int events;
-	bool enabled;
-
-	mutex_lock(&data->rw_mutex);
-	events = data->connection_events;
-	data->connection_events = 0;
-	enabled = data->keyboard_is_enable;
-	mutex_unlock(&data->rw_mutex);
-
-	if (!enabled || !(events & 1))
-		return;
-
-	xiaomi_keyboard_toggle_connected(data);
+	xiaomi_keyboard_set_connected(data, action == USB_DEVICE_ADD);
+	return NOTIFY_OK;
 }
 
 static ssize_t xiaomi_keyboard_conn_status_show(struct device *dev,
@@ -199,20 +186,33 @@ static const struct attribute_group xiaomi_keyboard_attr_group = {
 	.attrs = xiaomi_keyboard_attrs,
 };
 
+static struct attribute *xiaomi_keyboard_generic_attrs[] = {
+	&dev_attr_xiaomi_keyboard_enabled.attr,
+	&dev_attr_xiaomi_keyboard_connected.attr,
+	NULL,
+};
+
+static const struct attribute_group xiaomi_keyboard_generic_attr_group = {
+	.attrs = xiaomi_keyboard_generic_attrs,
+};
+
+static const struct attribute_group *
+xiaomi_keyboard_get_attr_group(struct xiaomi_keyboard_data *data)
+{
+	return data->pdata->generic_input ?
+		&xiaomi_keyboard_generic_attr_group :
+		&xiaomi_keyboard_attr_group;
+}
+
 static irqreturn_t xiaomi_keyboard_irq_func(int irq, void *data)
 {
 	struct xiaomi_keyboard_data *keyboard = data;
 	int value;
 
-	MI_KB_INFO("keyboard event: wakeup system\n");
 	pm_wakeup_event(&keyboard->pdev->dev, 1000);
 	value = gpio_get_value_cansleep(keyboard->pdata->in_irq_gpio);
-	mutex_lock(&keyboard->rw_mutex);
-	keyboard->connection_events++;
-	mutex_unlock(&keyboard->rw_mutex);
-	mod_delayed_work(keyboard->event_wq, &keyboard->connection_work,
-			 msecs_to_jiffies(500));
-	MI_KB_INFO("keyboard IRQ GPIO value: %d\n", value);
+	pr_info_ratelimited("[%s] keyboard IRQ GPIO value: %d\n",
+			    XIAOMI_KB_TAG, value);
 	return IRQ_HANDLED;
 }
 
@@ -308,10 +308,6 @@ static int xiaomi_keyboard_resetup_gpio(struct xiaomi_keyboard_platdata *pdata)
 		free_irq(mdata->irq, mdata);
 		mdata->irq_requested = false;
 	}
-	cancel_delayed_work_sync(&mdata->connection_work);
-	mutex_lock(&mdata->rw_mutex);
-	mdata->connection_events = 0;
-	mutex_unlock(&mdata->rw_mutex);
 	xiaomi_keyboard_set_connected(mdata, false);
 
 	return ret;
@@ -347,6 +343,8 @@ static int xiaomi_keyboard_parse_dt(struct device *dev)
 
 	pdata->default_enabled = of_property_read_bool(np,
 					"xiaomi-keyboard,default-enabled");
+	pdata->generic_input = of_property_read_bool(np,
+					"xiaomi-keyboard,generic-input");
 
 	return ret;
 }
@@ -670,7 +668,7 @@ static int xiaomi_keyboard_probe(struct platform_device *pdev)
 	mdata->is_in_suspend = false;
 
 	ret = sysfs_create_group(&pdev->dev.kobj,
-				 &xiaomi_keyboard_attr_group);
+				 xiaomi_keyboard_get_attr_group(mdata));
 	if (ret < 0) {
 		MI_KB_ERR("Create keyboard sysfs group failed\n");
 		goto err_deconfig_gpio;
@@ -686,14 +684,16 @@ static int xiaomi_keyboard_probe(struct platform_device *pdev)
 	INIT_WORK(&mdata->resume_work, keyboard_resume_work);
 	INIT_WORK(&mdata->suspend_work, keyboard_suspend_work);
 	INIT_WORK(&mdata->power_supply_work, kb_power_supply_work);
-	INIT_DELAYED_WORK(&mdata->connection_work,
-			  xiaomi_keyboard_connection_work);
+
+	mdata->usb_notifier.notifier_call = xiaomi_keyboard_usb_event;
+	usb_register_notify(&mdata->usb_notifier);
+	mdata->usb_notifier_registered = true;
 
 	mdata->drm_notif.notifier_call = keyboard_drm_notifier_callback;
 	ret = msm_drm_register_client(&mdata->drm_notif);
 	if (ret) {
 		MI_KB_ERR("register drm_notifier failed. ret=%d\n", ret);
-		goto err_destroy_workqueue;
+		goto err_unregister_usb;
 	}
 	mdata->drm_notifier_registered = true;
 
@@ -732,10 +732,16 @@ err_unregister_drm:
 	    msm_drm_unregister_client(&mdata->drm_notif))
 		MI_KB_ERR("Error occurred while unregistering drm_notifier\n");
 	mdata->drm_notifier_registered = false;
+err_unregister_usb:
+	if (mdata->usb_notifier_registered) {
+		usb_unregister_notify(&mdata->usb_notifier);
+		mdata->usb_notifier_registered = false;
+	}
 err_destroy_workqueue:
 	destroy_workqueue(mdata->event_wq);
 err_remove_sysfs:
-	sysfs_remove_group(&pdev->dev.kobj, &xiaomi_keyboard_attr_group);
+	sysfs_remove_group(&pdev->dev.kobj,
+			   xiaomi_keyboard_get_attr_group(mdata));
 err_deconfig_gpio:
 	xiaomi_keyboard_gpio_deconfig(pdata);
 err_destroy_mutexes:
@@ -762,11 +768,14 @@ static int xiaomi_keyboard_remove(struct platform_device *pdev)
 		power_supply_unreg_notifier(&data->power_supply_notifier);
 	if (data->drm_notifier_registered)
 		msm_drm_unregister_client(&data->drm_notif);
+	if (data->usb_notifier_registered)
+		usb_unregister_notify(&data->usb_notifier);
 
 	set_keyboard_status(false);
 	destroy_workqueue(data->event_wq);
 	device_init_wakeup(&pdev->dev, false);
-	sysfs_remove_group(&pdev->dev.kobj, &xiaomi_keyboard_attr_group);
+	sysfs_remove_group(&pdev->dev.kobj,
+			   xiaomi_keyboard_get_attr_group(data));
 	xiaomi_keyboard_gpio_deconfig(data->pdata);
 	platform_set_drvdata(pdev, NULL);
 	mutex_destroy(&data->rw_mutex);

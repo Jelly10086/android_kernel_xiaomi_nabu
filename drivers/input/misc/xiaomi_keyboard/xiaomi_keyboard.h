@@ -19,6 +19,7 @@ struct xiaomi_keyboard_platdata {
 	enum of_gpio_flags in_irq_flags;
 	int vdd_gpio;
 	bool default_enabled;
+	bool generic_input;
 };
 
 struct xiaomi_keyboard_data {
@@ -33,8 +34,6 @@ struct xiaomi_keyboard_data {
 	struct workqueue_struct *event_wq;
 	struct work_struct resume_work;
 	struct work_struct suspend_work;
-	struct delayed_work connection_work;
-	unsigned int connection_events;
 	int keyboard_conn_status;
 	struct mutex rw_mutex;
 	struct mutex state_lock;
@@ -42,12 +41,14 @@ struct xiaomi_keyboard_data {
 	struct mutex power_supply_lock;
 	struct work_struct power_supply_work;
 	struct notifier_block power_supply_notifier;
+	struct notifier_block usb_notifier;
 	int is_usb_exist;
 	bool keyboard_is_enable;
 	bool keyboard_is_connected;
 	bool irq_requested;
 	bool irq_wake_enabled;
 	bool power_supply_notifier_registered;
+	bool usb_notifier_registered;
 	bool drm_notifier_registered;
 	bool is_in_suspend;
 };

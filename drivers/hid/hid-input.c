@@ -1539,6 +1539,9 @@ static struct hid_input *hidinput_allocate(struct hid_device *hid)
 	input_dev->id.vendor  = hid->vendor;
 	input_dev->id.product = hid->product;
 	input_dev->id.version = hid->version;
+	if (hid->bus == BUS_USB && hid->vendor == 0x3206 &&
+	    hid->product == 0x3ffc)
+		input_dev->id.product = 0x3ffd;
 	input_dev->dev.parent = &hid->dev;
 	hidinput->input = input_dev;
 	list_add_tail(&hidinput->list, &hid->inputs);
@@ -1746,4 +1749,3 @@ void hidinput_disconnect(struct hid_device *hid)
 	cancel_work_sync(&hid->led_work);
 }
 EXPORT_SYMBOL_GPL(hidinput_disconnect);
-

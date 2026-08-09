@@ -565,6 +565,7 @@ And public attribution of xiaomi platforms(like J20S and so and)
 		xiaomi-keyboard,in-irq-gpio = <&tlmm 41 0x2001>;
 		xiaomi-keyboard,vdd-gpio = <&tlmm 82 0x00>;
 		xiaomi-keyboard,default-enabled;
+		xiaomi-keyboard,generic-input;
 		status = "ok";
 	};
 };

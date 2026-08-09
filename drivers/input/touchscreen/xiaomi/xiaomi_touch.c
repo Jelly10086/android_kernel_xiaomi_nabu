@@ -329,6 +329,38 @@ struct device_attribute *attr, char *buf)
 		return 0;
 }
 
+int xiaomi_touch_set_suspend_state(int state)
+{
+	if (!touch_pdata)
+		return -ENODEV;
+
+	touch_pdata->suspend_state = state;
+	sysfs_notify(&xiaomi_touch_dev.dev->kobj, NULL, "suspend_state");
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(xiaomi_touch_set_suspend_state);
+
+static ssize_t suspend_state_show(struct device *dev,
+struct device_attribute *attr, char *buf)
+{
+	struct xiaomi_touch_pdata *pdata = dev_get_drvdata(dev);
+
+	if (!pdata)
+		return -ENODEV;
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n", pdata->suspend_state);
+}
+
+/* Optional touch-health channels. Their presence keeps Xiaomi's event
+ * monitor on its blocking poll path when this touch IC has no THP backend.
+ */
+static ssize_t empty_event_show(struct device *dev,
+struct device_attribute *attr, char *buf)
+{
+	return 0;
+}
+
 static DEVICE_ATTR(palm_sensor, (S_IRUGO | S_IWUSR | S_IWGRP),
 		   palm_sensor_show, palm_sensor_store);
 
@@ -347,6 +379,15 @@ static DEVICE_ATTR(panel_display, (S_IRUGO),
 static DEVICE_ATTR(touch_vendor, (S_IRUGO),
 		   touch_vendor_show, NULL);
 
+static DEVICE_ATTR(suspend_state, S_IRUGO,
+		   suspend_state_show, NULL);
+
+static DEVICE_ATTR(touch_thp_cmd_ready, S_IRUGO,
+		   empty_event_show, NULL);
+
+static DEVICE_ATTR(abnormal_event, S_IRUGO,
+		   empty_event_show, NULL);
+
 static struct attribute *touch_attr_group[] = {
 	&dev_attr_palm_sensor.attr,
 	&dev_attr_p_sensor.attr,
@@ -354,6 +395,9 @@ static struct attribute *touch_attr_group[] = {
 	&dev_attr_panel_color.attr,
 	&dev_attr_panel_display.attr,
 	&dev_attr_touch_vendor.attr,
+	&dev_attr_suspend_state.attr,
+	&dev_attr_touch_thp_cmd_ready.attr,
+	&dev_attr_abnormal_event.attr,
 	NULL,
 };
 

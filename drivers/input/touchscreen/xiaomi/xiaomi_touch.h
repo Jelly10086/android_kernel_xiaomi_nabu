@@ -140,6 +140,7 @@ struct xiaomi_touch {
 struct xiaomi_touch_pdata{
 	struct xiaomi_touch *device;
 	struct xiaomi_touch_interface *touch_data;
+	int suspend_state;
 	int palm_value;
 	bool palm_changed;
 	int psensor_value;
@@ -157,6 +158,8 @@ extern struct device *get_xiaomi_touch_dev(void);
 extern int update_palm_sensor_value(int value);
 
 extern int update_p_sensor_value(int value);
+
+int xiaomi_touch_set_suspend_state(int state);
 
 int xiaomitouch_register_modedata(struct xiaomi_touch_interface *data);
 

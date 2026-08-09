@@ -3565,6 +3565,9 @@ static int32_t nvt_ts_suspend(struct device *dev)
 		ts->ic_state = NVT_IC_SUSPEND_OUT;
 	else
 		NVT_ERR("IC state may error,caused by suspend/resume flow, please CHECK!!");
+#ifdef CONFIG_TOUCHSCREEN_XIAOMI_TOUCHFEATURE
+	xiaomi_touch_set_suspend_state(1);
+#endif
 	pm_relax(dev);
 	NVT_LOG("end\n");
 
@@ -3652,8 +3655,9 @@ static int32_t nvt_ts_resume(struct device *dev)
 	}
 
 #ifdef CONFIG_TOUCHSCREEN_XIAOMI_TOUCHFEATURE
-		NVT_LOG("reload the game mode cmd");
-		nvt_game_mode_recovery();
+	NVT_LOG("reload the game mode cmd");
+	nvt_game_mode_recovery();
+	xiaomi_touch_set_suspend_state(0);
 #endif
 
 	if (ts->dev_pm_suspend)

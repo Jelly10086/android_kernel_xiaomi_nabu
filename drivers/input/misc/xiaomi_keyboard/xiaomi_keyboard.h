@@ -13,11 +13,12 @@
 #define MI_KB_ERR(fmt, args...)    pr_err("[%s] %s %d: " fmt, XIAOMI_KB_TAG, __func__, __LINE__, ##args)
 
 struct xiaomi_keyboard_platdata {
-	u32 rst_gpio;
-	u32 rst_flags;
-	u32 in_irq_gpio;
-	u32 in_irq_flags;
-	u32 vdd_gpio;
+	int rst_gpio;
+	enum of_gpio_flags rst_flags;
+	int in_irq_gpio;
+	enum of_gpio_flags in_irq_flags;
+	int vdd_gpio;
+	bool default_enabled;
 };
 
 struct xiaomi_keyboard_data {
@@ -34,12 +35,18 @@ struct xiaomi_keyboard_data {
 	struct work_struct suspend_work;
 	int keyboard_conn_status;
 	struct mutex rw_mutex;
+	struct mutex state_lock;
 
 	struct mutex power_supply_lock;
 	struct work_struct power_supply_work;
 	struct notifier_block power_supply_notifier;
 	int is_usb_exist;
 	bool keyboard_is_enable;
+	bool keyboard_is_connected;
+	bool irq_requested;
+	bool irq_wake_enabled;
+	bool power_supply_notifier_registered;
+	bool drm_notifier_registered;
 	bool is_in_suspend;
 };
 #endif

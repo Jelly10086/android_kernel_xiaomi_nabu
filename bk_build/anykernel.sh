@@ -64,6 +64,7 @@ module_stage=/data/adb/modules/bk-control.new;
 [ -f "$module_source/webroot/index.html" ] || abort "Missing bk-control WebUI.";
 [ -f "$module_source/scripts/bk-reburnout.sh" ] || abort "Missing Re.burnout-mode runtime policy.";
 [ -f "$module_source/scripts/bk-zram-writeback.sh" ] || abort "Missing zram writeback policy.";
+[ -f "$module_source/scripts/bk-wake-guard.sh" ] || abort "Missing wake guard.";
 [ -f "$module_source/bin/bk-zram-setup" ] || abort "Missing zram setup helper.";
 [ -f "$module_source/bin/bk-keyboard-monitor" ] || abort "Missing keyboard monitor.";
 [ -f "$module_source/bin/bkk-log-exporter.apk" ] || abort "Missing log exporter.";
@@ -84,6 +85,7 @@ if [ -d /data/adb ] && [ -w /data/adb ]; then
   set_perm 0 0 0755 "$module_target/uninstall.sh";
   set_perm 0 0 0755 "$module_target/scripts/bk-reburnout.sh";
   set_perm 0 0 0755 "$module_target/scripts/bk-zram-writeback.sh";
+  set_perm 0 0 0755 "$module_target/scripts/bk-wake-guard.sh";
   set_perm 0 0 0755 "$module_target/bin/bk-zram-setup";
   set_perm 0 0 0755 "$module_target/bin/bk-keyboard-monitor";
   rm -f /data/adb/service.d/bk-reburnout.sh;

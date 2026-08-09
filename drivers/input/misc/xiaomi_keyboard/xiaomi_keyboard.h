@@ -33,6 +33,8 @@ struct xiaomi_keyboard_data {
 	struct workqueue_struct *event_wq;
 	struct work_struct resume_work;
 	struct work_struct suspend_work;
+	struct delayed_work connection_work;
+	unsigned int connection_events;
 	int keyboard_conn_status;
 	struct mutex rw_mutex;
 	struct mutex state_lock;

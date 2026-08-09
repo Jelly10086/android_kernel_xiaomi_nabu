@@ -70,6 +70,25 @@ static bool xiaomi_keyboard_toggle_connected(struct xiaomi_keyboard_data *data)
 	return connected;
 }
 
+static void xiaomi_keyboard_connection_work(struct work_struct *work)
+{
+	struct xiaomi_keyboard_data *data = container_of(to_delayed_work(work),
+			struct xiaomi_keyboard_data, connection_work);
+	unsigned int events;
+	bool enabled;
+
+	mutex_lock(&data->rw_mutex);
+	events = data->connection_events;
+	data->connection_events = 0;
+	enabled = data->keyboard_is_enable;
+	mutex_unlock(&data->rw_mutex);
+
+	if (!enabled || !(events & 1))
+		return;
+
+	xiaomi_keyboard_toggle_connected(data);
+}
+
 static ssize_t xiaomi_keyboard_conn_status_show(struct device *dev,
 						struct device_attribute *attr,
 						char *buf)
@@ -182,16 +201,18 @@ static const struct attribute_group xiaomi_keyboard_attr_group = {
 
 static irqreturn_t xiaomi_keyboard_irq_func(int irq, void *data)
 {
-	bool connected;
+	struct xiaomi_keyboard_data *keyboard = data;
 	int value;
 
 	MI_KB_INFO("keyboard event: wakeup system\n");
-	pm_wakeup_event(&mdata->pdev->dev, 500);
-	value = gpio_get_value_cansleep(mdata->pdata->in_irq_gpio);
-
-	connected = xiaomi_keyboard_toggle_connected(mdata);
-	MI_KB_INFO("keyboard IRQ GPIO value: %d, connected: %d\n",
-		   value, connected);
+	pm_wakeup_event(&keyboard->pdev->dev, 1000);
+	value = gpio_get_value_cansleep(keyboard->pdata->in_irq_gpio);
+	mutex_lock(&keyboard->rw_mutex);
+	keyboard->connection_events++;
+	mutex_unlock(&keyboard->rw_mutex);
+	mod_delayed_work(keyboard->event_wq, &keyboard->connection_work,
+			 msecs_to_jiffies(500));
+	MI_KB_INFO("keyboard IRQ GPIO value: %d\n", value);
 	return IRQ_HANDLED;
 }
 
@@ -287,6 +308,10 @@ static int xiaomi_keyboard_resetup_gpio(struct xiaomi_keyboard_platdata *pdata)
 		free_irq(mdata->irq, mdata);
 		mdata->irq_requested = false;
 	}
+	cancel_delayed_work_sync(&mdata->connection_work);
+	mutex_lock(&mdata->rw_mutex);
+	mdata->connection_events = 0;
+	mutex_unlock(&mdata->rw_mutex);
 	xiaomi_keyboard_set_connected(mdata, false);
 
 	return ret;
@@ -661,6 +686,8 @@ static int xiaomi_keyboard_probe(struct platform_device *pdev)
 	INIT_WORK(&mdata->resume_work, keyboard_resume_work);
 	INIT_WORK(&mdata->suspend_work, keyboard_suspend_work);
 	INIT_WORK(&mdata->power_supply_work, kb_power_supply_work);
+	INIT_DELAYED_WORK(&mdata->connection_work,
+			  xiaomi_keyboard_connection_work);
 
 	mdata->drm_notif.notifier_call = keyboard_drm_notifier_callback;
 	ret = msm_drm_register_client(&mdata->drm_notif);
@@ -736,8 +763,8 @@ static int xiaomi_keyboard_remove(struct platform_device *pdev)
 	if (data->drm_notifier_registered)
 		msm_drm_unregister_client(&data->drm_notif);
 
-	destroy_workqueue(data->event_wq);
 	set_keyboard_status(false);
+	destroy_workqueue(data->event_wq);
 	device_init_wakeup(&pdev->dev, false);
 	sysfs_remove_group(&pdev->dev.kobj, &xiaomi_keyboard_attr_group);
 	xiaomi_keyboard_gpio_deconfig(data->pdata);

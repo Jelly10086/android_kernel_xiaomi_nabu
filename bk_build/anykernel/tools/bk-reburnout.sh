@@ -15,6 +15,7 @@ REB_DISABLE_FILE=$REB_DIR/Re.burnout-mode.disabled
 REB_RESTORE_FILE=$REB_DIR/Re.burnout-mode.restore
 REB_BOOT_FILE=$REB_DIR/Re.burnout-mode.boot_id
 REB_WB_STATE_FILE=$REB_DIR/zram-writeback.state
+REB_CONFIG_FILE=$REB_DIR/control.conf
 REB_PINNED_FILE=$REB_DIR/Re.burnout-mode.top-app
 REB_PINNED_TMP=$REB_DIR/Re.burnout-mode.top-app.tmp
 REB_UI_TIDS_FILE=$REB_DIR/Re.burnout-mode.ui-tids
@@ -34,6 +35,9 @@ REB_RUNNABLE_ENTER=7
 REB_RUNNABLE_EXIT=3
 REB_TEMP_ENTER=70000
 REB_TEMP_EXIT=80000
+REB_TASK_GUARD=6200
+REB_TASK_GUARD_SAMPLES=2
+REB_TASK_GUARD_COOLDOWN_SAMPLES=24
 REB_WB_FLUSH_SAMPLES=12
 REB_WB_DAY_SECONDS=86400
 REB_WB_DAILY_PAGES=65536
@@ -50,7 +54,18 @@ reb_write()
 	REB_CURRENT_VALUE=
 	IFS= read -r REB_CURRENT_VALUE < "$1" 2>/dev/null || true
 	[ "$REB_CURRENT_VALUE" = "$2" ] && return 0
-	printf '%s\n' "$2" > "$1" 2>/dev/null || true
+	printf '%s\n' "$2" 2>/dev/null > "$1" || true
+}
+
+reb_config_get()
+{
+	REB_CONFIG_VALUE=$2
+	[ -r "$REB_CONFIG_FILE" ] || return 0
+	while IFS='=' read -r REB_CONFIG_KEY REB_CONFIG_ENTRY; do
+		[ "$REB_CONFIG_KEY" = "$1" ] || continue
+		REB_CONFIG_VALUE=$REB_CONFIG_ENTRY
+		return 0
+	done < "$REB_CONFIG_FILE"
 }
 
 reb_daemon_running()
@@ -65,20 +80,23 @@ reb_daemon_running()
 reb_apply_cpuset()
 {
 	reb_write /dev/cpuset/background/cpus 0-2
-	reb_write /dev/cpuset/system-background/cpus 0-3
-	reb_write /dev/cpuset/foreground/cpus 0-7
+	reb_write /dev/cpuset/system-background/cpus 0-2,4-7
+	reb_write /dev/cpuset/foreground/cpus 0-2,4-7
+	reb_write /dev/cpuset/audio-app/cpus 0-2,4-7
 	reb_write /dev/cpuset/top-app/cpus 0-7
 }
 
 reb_apply_swappiness()
 {
-	reb_write /proc/sys/vm/swappiness 180
+	reb_config_get swappiness 180
+	case "$REB_CONFIG_VALUE" in 160|180) ;; *) REB_CONFIG_VALUE=180 ;; esac
+	reb_write /proc/sys/vm/swappiness "$REB_CONFIG_VALUE"
 	for REB_SWAPPINESS_NODE in \
 		/dev/memcg/memory.swappiness \
 		/dev/memcg/apps/memory.swappiness \
 		/dev/memcg/system/memory.swappiness \
 		/sys/fs/cgroup/bg/memory.swappiness; do
-		reb_write "$REB_SWAPPINESS_NODE" 180
+		reb_write "$REB_SWAPPINESS_NODE" "$REB_CONFIG_VALUE"
 	done
 }
 
@@ -105,10 +123,46 @@ reb_apply_memory()
 	reb_apply_swappiness
 }
 
+reb_init_process_reclaim()
+{
+	REB_RECLAIM_DIR=/sys/module/process_reclaim/parameters
+	[ -d "$REB_RECLAIM_DIR" ] || return 0
+	reb_write "$REB_RECLAIM_DIR/cancel_process_reclaim" 1
+	reb_write "$REB_RECLAIM_DIR/enable_process_reclaim" 0
+	reb_write "$REB_RECLAIM_DIR/min_score_adj" 500
+	reb_write "$REB_RECLAIM_DIR/per_swap_size" 256
+	reb_write "$REB_RECLAIM_DIR/pressure_min" 65
+	reb_write "$REB_RECLAIM_DIR/pressure_max" 90
+	reb_write "$REB_RECLAIM_DIR/swap_opt_eff" 30
+}
+
+reb_process_reclaim_tick()
+{
+	REB_RECLAIM_DIR=/sys/module/process_reclaim/parameters
+	[ -d "$REB_RECLAIM_DIR" ] || return 0
+	reb_write "$REB_RECLAIM_DIR/min_score_adj" 500
+	reb_write "$REB_RECLAIM_DIR/per_swap_size" 256
+	reb_write "$REB_RECLAIM_DIR/pressure_min" 65
+	reb_write "$REB_RECLAIM_DIR/pressure_max" 90
+	reb_write "$REB_RECLAIM_DIR/swap_opt_eff" 30
+	REB_RECLAIM_MEM=$(awk '/^MemAvailable:/ { print $2; exit }' \
+		/proc/meminfo 2>/dev/null)
+	case "$REB_RECLAIM_MEM" in ''|*[!0-9]*) REB_RECLAIM_MEM=0 ;; esac
+	if ! reb_screen_on && [ "$REB_RECLAIM_MEM" -le 2097152 ] && \
+	   [ "$REB_CPU_BUSY" -le 35 ] && [ "$REB_GPU_BUSY" -le 10 ] && \
+	   [ "$REB_RUNNABLE" -le 2 ]; then
+		reb_write "$REB_RECLAIM_DIR/cancel_process_reclaim" 0
+		reb_write "$REB_RECLAIM_DIR/enable_process_reclaim" 1
+	else
+		reb_write "$REB_RECLAIM_DIR/cancel_process_reclaim" 1
+		reb_write "$REB_RECLAIM_DIR/enable_process_reclaim" 0
+	fi
+}
+
 reb_setup_zram_backing()
 {
 	REB_ZRAM=/sys/block/zram0
-	REB_ZRAM_HELPER=/data/adb/bk-kernel/bk-zram-setup
+	REB_ZRAM_HELPER=${BK_CONTROL_DIR:-/data/adb/modules/bk-control}/bin/bk-zram-setup
 	REB_ZRAM_BACKING=$(cat "$REB_ZRAM/backing_dev" 2>/dev/null)
 	[ "$REB_ZRAM_BACKING" = none ] || return 0
 	[ -x "$REB_ZRAM_HELPER" ] || {
@@ -161,6 +215,12 @@ reb_refill_writeback_limit()
 reb_zram_writeback_tick()
 {
 	REB_ZRAM=/sys/block/zram0
+	reb_config_get protected_writeback 1
+	[ "$REB_CONFIG_VALUE" = 1 ] || {
+		REB_WB_IDLE_COUNT=0
+		REB_WB_MARKED=0
+		return 0
+	}
 	REB_ZRAM_BACKING=$(cat "$REB_ZRAM/backing_dev" 2>/dev/null)
 	if [ -z "$REB_ZRAM_BACKING" ] || [ "$REB_ZRAM_BACKING" = none ]; then
 		REB_WB_IDLE_COUNT=0
@@ -168,6 +228,17 @@ reb_zram_writeback_tick()
 		return 0
 	fi
 	if reb_screen_on; then
+		REB_WB_IDLE_COUNT=0
+		REB_WB_MARKED=0
+		return 0
+	fi
+	REB_MEM_AVAILABLE=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null)
+	case "$REB_MEM_AVAILABLE" in ''|*[!0-9]*) REB_MEM_AVAILABLE=0 ;; esac
+	if [ "$REB_MEM_AVAILABLE" -gt 2097152 ] || \
+	   [ "${REB_CPU_BUSY:-0}" -gt 35 ] || \
+	   [ "${REB_GPU_BUSY:-0}" -gt 10 ] || \
+	   [ "${REB_RUNNABLE:-0}" -gt 2 ] || \
+	   reb_protected_ui_has_swap; then
 		REB_WB_IDLE_COUNT=0
 		REB_WB_MARKED=0
 		return 0
@@ -183,9 +254,8 @@ reb_zram_writeback_tick()
 
 	REB_WB_IDLE_COUNT=$((REB_WB_IDLE_COUNT + 1))
 	if [ "$REB_WB_IDLE_COUNT" -eq 1 ]; then
-		# Incompressible pages do not benefit from staying in zram.  Start
-		# reclaim as soon as the display is off, then age normal pages for one
-		# continuous minute before writing them out.
+		# Age slots only while the display is off, memory is low and user-facing
+		# work is quiet. Protected UI processes are kept out of swap separately.
 		printf '%s\n' huge > "$REB_ZRAM/writeback" 2>/dev/null || true
 		if printf '%s\n' all > "$REB_ZRAM/idle" 2>/dev/null; then
 			REB_WB_MARKED=1
@@ -199,6 +269,18 @@ reb_zram_writeback_tick()
 		REB_WB_IDLE_COUNT=0
 		REB_WB_MARKED=0
 	fi
+}
+
+reb_protected_ui_has_swap()
+{
+	for REB_PROTECTED_PID in $REB_HOME_PIDS $REB_SYSTEMUI_PIDS; do
+		[ -r "/proc/$REB_PROTECTED_PID/status" ] || continue
+		REB_PROTECTED_SWAP=$(awk '/^VmSwap:/ { print $2; exit }' \
+			"/proc/$REB_PROTECTED_PID/status" 2>/dev/null)
+		case "$REB_PROTECTED_SWAP" in ''|*[!0-9]*) continue ;; esac
+		[ "$REB_PROTECTED_SWAP" -gt 0 ] && return 0
+	done
+	return 1
 }
 
 reb_read_allowed_list()
@@ -217,6 +299,38 @@ reb_read_allowed_list()
 	done < "/proc/$1/status"
 }
 
+reb_update_perf_taskset()
+{
+	REB_PERF_ONLINE=0
+	for REB_PERF_CPU in 4 5 6 7; do
+		REB_PERF_ONLINE_NODE=/sys/devices/system/cpu/cpu$REB_PERF_CPU/online
+		if [ ! -r "$REB_PERF_ONLINE_NODE" ] || \
+		   [ "$(cat "$REB_PERF_ONLINE_NODE" 2>/dev/null)" = 1 ]; then
+			REB_PERF_ONLINE=$((REB_PERF_ONLINE + 1))
+		fi
+	done
+	if [ "$REB_PERF_ONLINE" -ge 3 ]; then
+		REB_NEW_PERF_TASKSET=f0
+	else
+		REB_NEW_PERF_TASKSET=f7
+	fi
+	[ "$REB_PERF_TASKSET" = "$REB_NEW_PERF_TASKSET" ] && return 0
+	REB_PERF_TASKSET=$REB_NEW_PERF_TASKSET
+	REB_LAST_COMPOSER_TASK_COUNT=-1
+	REB_LAST_HOME_TASK_COUNT=-1
+	REB_LAST_SYSTEMUI_TASK_COUNT=-1
+	rm -f "$REB_UI_TIDS_FILE" "$REB_UI_TIDS_TMP"
+	reb_log "ui affinity mask=$REB_PERF_TASKSET perf_cpus=$REB_PERF_ONLINE"
+}
+
+reb_allowed_matches_perf()
+{
+	case "$REB_PERF_TASKSET:$REB_ALLOWED_LIST" in
+		f0:4*|f0:5*|f0:6*|f0:7*|f7:0-2,4*) return 0 ;;
+	esac
+	return 1
+}
+
 reb_pin_composer()
 {
 	REB_COMPOSER_PIDS=$(pidof vendor.qti.hardware.display.composer-service 2>/dev/null)
@@ -228,7 +342,7 @@ reb_pin_composer()
 				REB_COMPOSER_TASK_COUNT=$((REB_COMPOSER_TASK_COUNT + 1))
 		done
 		reb_read_allowed_list "$REB_PROCESS_PID"
-		[ "$REB_ALLOWED_LIST" = "4-7" ] || REB_COMPOSER_REFRESH=1
+		reb_allowed_matches_perf || REB_COMPOSER_REFRESH=1
 	done
 	if [ "$REB_COMPOSER_PIDS" != "$REB_LAST_COMPOSER_PIDS" ] || \
 	   [ "$REB_COMPOSER_TASK_COUNT" -ne "$REB_LAST_COMPOSER_TASK_COUNT" ]; then
@@ -236,38 +350,15 @@ reb_pin_composer()
 	fi
 	[ "$REB_COMPOSER_REFRESH" -eq 1 ] || return 0
 	for REB_PROCESS_PID in $REB_COMPOSER_PIDS; do
-		taskset -ap f0 "$REB_PROCESS_PID" >/dev/null 2>&1 || true
+		taskset -ap "$REB_PERF_TASKSET" "$REB_PROCESS_PID" >/dev/null 2>&1 || true
 	done
 	REB_LAST_COMPOSER_PIDS=$REB_COMPOSER_PIDS
 	REB_LAST_COMPOSER_TASK_COUNT=$REB_COMPOSER_TASK_COUNT
 }
 
-reb_pid_in_top_app()
-{
-	[ -r "/proc/$1/cgroup" ] || return 1
-	while IFS=: read -r REB_CGROUP_ID REB_CGROUP_CONTROLLERS REB_CGROUP_PATH; do
-		case ",$REB_CGROUP_CONTROLLERS," in
-			*,cpuset,*) [ "$REB_CGROUP_PATH" = /top-app ]; return ;;
-		esac
-	done < "/proc/$1/cgroup"
-	return 1
-}
-
-reb_move_pid_top_app()
-{
-	[ -d "/proc/$1/task" ] || return 0
-	for REB_TOP_TASK in /proc/$1/task/*; do
-		[ -d "$REB_TOP_TASK" ] || continue
-		REB_TOP_TID=${REB_TOP_TASK##*/}
-		[ -w /dev/cpuset/top-app/tasks ] && \
-			printf '%s\n' "$REB_TOP_TID" > /dev/cpuset/top-app/tasks 2>/dev/null || true
-		[ -w /dev/stune/top-app/tasks ] && \
-			printf '%s\n' "$REB_TOP_TID" > /dev/stune/top-app/tasks 2>/dev/null || true
-	done
-}
-
 reb_pin_home()
 {
+	# Android owns cpuset membership.  Repeated cgroup moves can block fork.
 	REB_HOME_PIDS=$(pidof com.miui.home 2>/dev/null)
 	REB_HOME_TASK_COUNT=0
 	REB_HOME_REFRESH=0
@@ -276,12 +367,11 @@ reb_pin_home()
 			[ -d "$REB_HOME_TASK" ] && \
 				REB_HOME_TASK_COUNT=$((REB_HOME_TASK_COUNT + 1))
 		done
-		if ! reb_pid_in_top_app "$REB_PROCESS_PID"; then
-			reb_move_pid_top_app "$REB_PROCESS_PID"
-			REB_HOME_REFRESH=1
-		fi
 		reb_read_allowed_list "$REB_PROCESS_PID"
-		[ "$REB_ALLOWED_LIST" = "4-7" ] || REB_HOME_REFRESH=1
+		case "$REB_ALLOWED_LIST" in
+			4*|0-2,4*) ;;
+			*) REB_HOME_REFRESH=1 ;;
+		esac
 	done
 	if [ "$REB_HOME_PIDS" != "$REB_LAST_HOME_PIDS" ] || \
 	   [ "$REB_HOME_TASK_COUNT" -ne "$REB_LAST_HOME_TASK_COUNT" ]; then
@@ -289,8 +379,14 @@ reb_pin_home()
 	fi
 	for REB_PROCESS_PID in $REB_HOME_PIDS; do
 		if [ "$REB_HOME_REFRESH" -eq 1 ]; then
-			taskset -ap ff "$REB_PROCESS_PID" >/dev/null 2>&1 || true
-			taskset -p f0 "$REB_PROCESS_PID" >/dev/null 2>&1 || true
+			if [ "$REB_WIDGET_MODE" -eq 1 ]; then
+				taskset -ap "$REB_PERF_TASKSET" "$REB_PROCESS_PID" >/dev/null 2>&1 || true
+				taskset -p "$REB_PERF_TASKSET" "$REB_PROCESS_PID" >/dev/null 2>&1 || true
+			else
+				taskset -ap f7 "$REB_PROCESS_PID" >/dev/null 2>&1 || true
+				# Keep launcher input dispatch on the performance cluster.
+				taskset -p "$REB_PERF_TASKSET" "$REB_PROCESS_PID" >/dev/null 2>&1 || true
+			fi
 		fi
 		for REB_HOME_TASK in /proc/$REB_PROCESS_PID/task/*; do
 			[ -r "$REB_HOME_TASK/comm" ] || continue
@@ -300,8 +396,8 @@ reb_pin_home()
 				RenderThread|HwuiTask*|hwuiTask*|HomeShellAnim|\
 				SurfaceSyncGrou|AnimThread*|FsGestureSecond)
 					reb_read_allowed_list "${REB_HOME_TASK##*/}"
-					[ "$REB_ALLOWED_LIST" = "4-7" ] || \
-						taskset -p f0 "${REB_HOME_TASK##*/}" >/dev/null 2>&1 || true
+					reb_allowed_matches_perf || \
+						taskset -p "$REB_PERF_TASKSET" "${REB_HOME_TASK##*/}" >/dev/null 2>&1 || true
 					;;
 			esac
 		done
@@ -312,6 +408,7 @@ reb_pin_home()
 
 reb_tune_transition_threads()
 {
+	# Keep SystemUI in its framework-managed cgroup and tune affinity only.
 	REB_SYSTEMUI_PIDS=$(pidof com.android.systemui 2>/dev/null)
 	REB_SYSTEMUI_TASK_COUNT=0
 	REB_SYSTEMUI_REFRESH=0
@@ -320,12 +417,11 @@ reb_tune_transition_threads()
 			[ -d "$REB_TASK" ] && \
 				REB_SYSTEMUI_TASK_COUNT=$((REB_SYSTEMUI_TASK_COUNT + 1))
 		done
-		if ! reb_pid_in_top_app "$REB_PROCESS_PID"; then
-			reb_move_pid_top_app "$REB_PROCESS_PID"
-			REB_SYSTEMUI_REFRESH=1
-		fi
 		reb_read_allowed_list "$REB_PROCESS_PID"
-		[ "$REB_ALLOWED_LIST" = "4-7" ] || REB_SYSTEMUI_REFRESH=1
+		case "$REB_ALLOWED_LIST" in
+			0-2,4*) ;;
+			*) REB_SYSTEMUI_REFRESH=1 ;;
+		esac
 	done
 	if [ "$REB_SYSTEMUI_PIDS" != "$REB_LAST_SYSTEMUI_PIDS" ] || \
 	   [ "$REB_SYSTEMUI_TASK_COUNT" -ne "$REB_LAST_SYSTEMUI_TASK_COUNT" ]; then
@@ -333,8 +429,8 @@ reb_tune_transition_threads()
 	fi
 	if [ "$REB_SYSTEMUI_REFRESH" -eq 1 ]; then
 		for REB_PROCESS_PID in $REB_SYSTEMUI_PIDS; do
-			taskset -ap ff "$REB_PROCESS_PID" >/dev/null 2>&1 || true
-			taskset -p f0 "$REB_PROCESS_PID" >/dev/null 2>&1 || true
+			taskset -ap f7 "$REB_PROCESS_PID" >/dev/null 2>&1 || true
+			taskset -p f7 "$REB_PROCESS_PID" >/dev/null 2>&1 || true
 		done
 		rm -f "$REB_UI_TIDS_FILE" "$REB_UI_TIDS_TMP"
 	fi
@@ -354,10 +450,11 @@ reb_tune_transition_threads()
 			printf '%s\n' "$REB_UI_TID" >> "$REB_UI_TIDS_TMP"
 			REB_UI_ALLOWED=$(awk '/^Cpus_allowed_list:/ { print $2; exit }' \
 				"$REB_TASK/status" 2>/dev/null)
+			REB_ALLOWED_LIST=$REB_UI_ALLOWED
 			if ! grep -qx "$REB_UI_TID" "$REB_UI_TIDS_FILE" 2>/dev/null || \
-			   [ "$REB_UI_ALLOWED" != "4-7" ]; then
-				# Restrict only app-transition workers. CPU7 remains an EAS fallback.
-				taskset -p f0 "$REB_UI_TID" >/dev/null 2>&1 || true
+			   ! reb_allowed_matches_perf; then
+				# Keep transition workers on the usable performance set.
+				taskset -p "$REB_PERF_TASKSET" "$REB_UI_TID" >/dev/null 2>&1 || true
 			fi
 		done
 	done
@@ -366,11 +463,94 @@ reb_tune_transition_threads()
 	REB_LAST_SYSTEMUI_TASK_COUNT=$REB_SYSTEMUI_TASK_COUNT
 }
 
+reb_tune_audio()
+{
+	reb_config_get audio_boost 1
+	[ "$REB_CONFIG_VALUE" = 1 ] || return 0
+	for REB_AUDIO_PID in $(pidof audioserver android.hardware.audio.service 2>/dev/null); do
+		[ -d "/proc/$REB_AUDIO_PID/task" ] || continue
+		taskset -p f7 "$REB_AUDIO_PID" >/dev/null 2>&1 || true
+		for REB_AUDIO_TASK in /proc/$REB_AUDIO_PID/task/*; do
+			[ -r "$REB_AUDIO_TASK/comm" ] || continue
+			REB_AUDIO_TID=${REB_AUDIO_TASK##*/}
+			REB_AUDIO_COMM=
+			IFS= read -r REB_AUDIO_COMM < "$REB_AUDIO_TASK/comm" 2>/dev/null || true
+			case "$REB_AUDIO_COMM" in
+				FastMixer|AudioOut*|AudioFlinger*|ApmAudio|ApmOutput|effect|writer)
+					reb_read_allowed_list "$REB_AUDIO_TID"
+					reb_allowed_matches_perf || \
+						taskset -p "$REB_PERF_TASKSET" "$REB_AUDIO_TID" >/dev/null 2>&1 || true
+					;;
+			esac
+		done
+	done
+}
+
+reb_widget_boost_tick()
+{
+	reb_config_get widget_boost 1
+	if [ "$REB_CONFIG_VALUE" != 1 ] || [ -z "$REB_HOME_PIDS" ]; then
+		REB_WIDGET_MODE=0
+		REB_WIDGET_HIGH_COUNT=0
+		REB_WIDGET_LOW_COUNT=0
+		REB_HOME_PREV_JIFFIES=
+		return 0
+	fi
+
+	set -- $REB_HOME_PIDS
+	REB_WIDGET_HOME_PID=${1:-}
+	[ -r "/proc/$REB_WIDGET_HOME_PID/stat" ] || return 0
+	REB_WIDGET_ADJ=$(cat "/proc/$REB_WIDGET_HOME_PID/oom_score_adj" 2>/dev/null)
+	case "$REB_WIDGET_ADJ" in ''|*[!0-9-]*) REB_WIDGET_ADJ=1000 ;; esac
+	REB_TOP_STAT=
+	IFS= read -r REB_TOP_STAT < "/proc/$REB_WIDGET_HOME_PID/stat" 2>/dev/null || return 0
+	REB_TOP_STAT=${REB_TOP_STAT#*) }
+	set -- $REB_TOP_STAT
+	[ "$#" -ge 13 ] || return 0
+	REB_HOME_JIFFIES=$((${12} + ${13}))
+	if [ -n "$REB_HOME_PREV_JIFFIES" ]; then
+		REB_HOME_DELTA=$((REB_HOME_JIFFIES - REB_HOME_PREV_JIFFIES))
+	else
+		REB_HOME_DELTA=0
+	fi
+	REB_HOME_PREV_JIFFIES=$REB_HOME_JIFFIES
+
+	if [ "$REB_WIDGET_ADJ" -le 0 ] && [ "$REB_HOME_DELTA" -ge 25 ]; then
+		REB_WIDGET_HIGH_COUNT=$((REB_WIDGET_HIGH_COUNT + 1))
+		REB_WIDGET_LOW_COUNT=0
+	else
+		REB_WIDGET_HIGH_COUNT=0
+		REB_WIDGET_LOW_COUNT=$((REB_WIDGET_LOW_COUNT + 1))
+	fi
+
+	if [ "$REB_WIDGET_MODE" -eq 0 ] && [ "$REB_WIDGET_HIGH_COUNT" -ge 1 ]; then
+		REB_WIDGET_MODE=1
+		reb_log "widget boost enabled pid=$REB_WIDGET_HOME_PID delta=$REB_HOME_DELTA"
+	elif [ "$REB_WIDGET_MODE" -eq 1 ] && [ "$REB_WIDGET_LOW_COUNT" -ge 3 ]; then
+		REB_WIDGET_MODE=0
+		reb_log "widget boost disabled"
+		for REB_PROCESS_PID in $REB_HOME_PIDS; do
+			taskset -ap f7 "$REB_PROCESS_PID" >/dev/null 2>&1 || true
+		done
+		REB_LAST_HOME_TASK_COUNT=-1
+	fi
+
+	if [ "$REB_WIDGET_MODE" -eq 1 ]; then
+		for REB_PROCESS_PID in $REB_HOME_PIDS; do
+			taskset -ap "$REB_PERF_TASKSET" "$REB_PROCESS_PID" >/dev/null 2>&1 || true
+		done
+	fi
+}
+
 reb_pin_ui()
 {
+	reb_update_perf_taskset
 	reb_pin_composer
+	REB_HOME_PIDS=$(pidof com.miui.home 2>/dev/null)
+	reb_widget_boost_tick
 	reb_pin_home
 	reb_tune_transition_threads
+	reb_tune_audio
 }
 
 reb_apply_base()
@@ -474,8 +654,8 @@ reb_refresh_top_app()
 		reb_top_thread_is_heavy || \
 			reb_tid_is_cpu_heavy "$REB_TOP_TID" || continue
 		reb_read_allowed_list "$REB_TOP_TID"
-		[ "$REB_ALLOWED_LIST" = "4-7" ] || \
-			taskset -p f0 "$REB_TOP_TID" >/dev/null 2>&1 || continue
+		reb_allowed_matches_perf || \
+			taskset -p "$REB_PERF_TASKSET" "$REB_TOP_TID" >/dev/null 2>&1 || continue
 		printf '%s\n' "$REB_TOP_TID" >> "$REB_PINNED_TMP"
 	done < /dev/cpuset/top-app/tasks
 	if [ -r "$REB_PINNED_FILE" ]; then
@@ -641,9 +821,10 @@ reb_gpu_busy()
 	awk '{ print $1 + 0; exit }' /sys/class/kgsl/kgsl-3d0/gpu_busy_percentage 2>/dev/null
 }
 
-reb_runnable()
+reb_load_sample()
 {
-	awk '{ split($4, value, "/"); print value[1] + 0; exit }' /proc/loadavg 2>/dev/null
+	awk '{ split($4, value, "/"); print value[1] + 0, value[2] + 0; exit }' \
+		/proc/loadavg 2>/dev/null
 }
 
 reb_max_temp()
@@ -680,9 +861,9 @@ reb_screen_on()
 
 reb_write_status()
 {
-	printf '%s mode=%s cpu=%s gpu=%s temp_mC=%s runnable=%s\n' \
+	printf '%s mode=%s cpu=%s gpu=%s temp_mC=%s runnable=%s tasks=%s\n' \
 		"$REB_MODE_NAME" "$1" "$REB_CPU_BUSY" "$REB_GPU_BUSY" \
-		"$REB_TEMP" "$REB_RUNNABLE" > "$REB_STATUS_FILE"
+		"$REB_TEMP" "$REB_RUNNABLE" "$REB_TASKS" > "$REB_STATUS_FILE"
 }
 
 reb_cleanup()
@@ -717,16 +898,22 @@ REB_LAST_HOME_PIDS=
 REB_LAST_HOME_TASK_COUNT=-1
 REB_LAST_SYSTEMUI_PIDS=
 REB_LAST_SYSTEMUI_TASK_COUNT=-1
+REB_WIDGET_MODE=0
+REB_WIDGET_HIGH_COUNT=0
+REB_WIDGET_LOW_COUNT=0
+REB_HOME_PREV_JIFFIES=
+REB_PERF_TASKSET=
 trap 'reb_cleanup' EXIT HUP INT TERM
 
 case "$(uname -r)" in
-	4.14.336_bk-Kernel_17.0-b1) ;;
+	4.14.336_bk-Kernel_17.0-b2w1) ;;
 	*) reb_log "ignored on incompatible kernel $(uname -r)"; exit 0 ;;
 esac
 
 # service.d starts before Android reports boot completion.  Install the
 # allocation reserve here so it also covers the late modem/QRTR startup burst.
 reb_apply_memory
+reb_init_process_reclaim
 
 while [ "$(getprop sys.boot_completed 2>/dev/null)" != "1" ]; do
 	sleep 2
@@ -761,6 +948,8 @@ REB_COOLDOWN=0
 REB_WARMUP=$REB_AUTO_DELAY_SAMPLES
 REB_WB_IDLE_COUNT=0
 REB_WB_MARKED=0
+REB_TASK_HIGH_COUNT=0
+REB_TASK_GUARD_COOLDOWN=0
 reb_log "started"
 
 while :; do
@@ -780,11 +969,33 @@ while :; do
 	REB_PREV_TOTAL=$REB_TOTAL
 	REB_PREV_IDLE=$REB_IDLE
 	REB_GPU_BUSY=$(reb_gpu_busy)
-	REB_RUNNABLE=$(reb_runnable)
+	set -- $(reb_load_sample)
+	REB_RUNNABLE=${1:-0}
+	REB_TASKS=${2:-0}
 	REB_TEMP=$(reb_max_temp)
 	case "$REB_GPU_BUSY" in ''|*[!0-9]*) REB_GPU_BUSY=0 ;; esac
 	case "$REB_RUNNABLE" in ''|*[!0-9]*) REB_RUNNABLE=0 ;; esac
+	case "$REB_TASKS" in ''|*[!0-9]*) REB_TASKS=0 ;; esac
 	case "$REB_TEMP" in ''|*[!0-9]*) REB_TEMP=0 ;; esac
+	[ "$REB_TASK_GUARD_COOLDOWN" -gt 0 ] && \
+		REB_TASK_GUARD_COOLDOWN=$((REB_TASK_GUARD_COOLDOWN - 1))
+	if [ "$REB_TASK_GUARD_COOLDOWN" -eq 0 ] && \
+	   [ "$REB_TASKS" -ge "$REB_TASK_GUARD" ]; then
+		REB_TASK_HIGH_COUNT=$((REB_TASK_HIGH_COUNT + 1))
+	else
+		REB_TASK_HIGH_COUNT=0
+	fi
+	if [ "$REB_TASK_HIGH_COUNT" -ge "$REB_TASK_GUARD_SAMPLES" ]; then
+		reb_init_process_reclaim
+		reb_leave_mode
+		am kill-all >/dev/null 2>&1 || true
+		REB_TASK_HIGH_COUNT=0
+		REB_TASK_GUARD_COOLDOWN=$REB_TASK_GUARD_COOLDOWN_SAMPLES
+		reb_write_status guarded
+		reb_log "trimmed cached processes task guard tasks=$REB_TASKS"
+		continue
+	fi
+	reb_process_reclaim_tick
 	reb_zram_writeback_tick
 
 	if [ -e "$REB_DISABLE_FILE" ]; then

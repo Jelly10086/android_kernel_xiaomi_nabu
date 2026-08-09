@@ -6,7 +6,7 @@ export PATH
 umask 077
 
 ZRAM=/sys/block/zram0
-HELPER=/data/adb/bk-kernel/bk-zram-setup
+HELPER=${BK_CONTROL_DIR:-/data/adb/modules/bk-control}/bin/bk-zram-setup
 LOG=/data/adb/bk-kernel/zram-writeback.log
 
 mkdir -p /data/adb/bk-kernel /data/per_boot || exit 0

@@ -1,6 +1,7 @@
 package org.bkkernel.logexport;
 
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
@@ -15,20 +16,21 @@ import java.io.OutputStream;
 public final class ExportActivity extends Activity {
     private static final int CREATE_LOG = 1;
     private File source;
+    private String name;
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         if (state != null) {
-            String path = state.getString("source");
-            source = path == null ? null : new File(path);
+            name = state.getString("name");
+            source = sourceFor(name);
             return;
         }
 
-        String path = getIntent().getStringExtra("source");
-        String name = getIntent().getStringExtra("name");
-        source = path == null ? null : new File(path);
-        if (!validSource(source) || name == null || !name.matches("bkk-control-[0-9-]+\\.tar\\.gz")) {
+        name = getIntent().getStringExtra("name");
+        source = sourceFor(name);
+        if (!validSource(source)) {
+            Toast.makeText(this, "日志导出文件无效", Toast.LENGTH_SHORT).show();
             finish();
             return;
         }
@@ -36,14 +38,29 @@ public final class ExportActivity extends Activity {
         Intent save = new Intent(Intent.ACTION_CREATE_DOCUMENT)
                 .addCategory(Intent.CATEGORY_OPENABLE)
                 .setType("application/gzip")
-                .putExtra(Intent.EXTRA_TITLE, name);
-        startActivityForResult(save, CREATE_LOG);
+                .putExtra(Intent.EXTRA_TITLE, name)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        try {
+            startActivityForResult(save, CREATE_LOG);
+        } catch (ActivityNotFoundException | SecurityException error) {
+            Toast.makeText(this, "无法打开文件管理器", Toast.LENGTH_SHORT).show();
+            source.delete();
+            finish();
+        }
     }
 
     @Override
     protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state);
-        if (source != null) state.putString("source", source.getPath());
+        if (name != null) state.putString("name", name);
+    }
+
+    private File sourceFor(String fileName) {
+        if (fileName == null || !fileName.matches("bkk-control-[0-9-]+\\.tar\\.gz")) {
+            return null;
+        }
+        return new File(getFilesDir(), fileName);
     }
 
     @Override
@@ -80,7 +97,7 @@ public final class ExportActivity extends Activity {
             while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
             output.flush();
             return true;
-        } catch (IOException ignored) {
+        } catch (IOException | SecurityException ignored) {
             Toast.makeText(this, "日志保存失败", Toast.LENGTH_SHORT).show();
             return false;
         }

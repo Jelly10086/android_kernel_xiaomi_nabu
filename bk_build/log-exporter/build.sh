@@ -22,7 +22,7 @@ mkdir -p "$OUT/classes" "$OUT/dex" "$(dirname "$APK")"
 "$D8" --lib "$ANDROID_JAR" --min-api 26 --output "$OUT/dex" "$OUT/classes.jar"
 "$AAPT2" link -o "$OUT/unsigned.apk" -I "$ANDROID_JAR" \
 	--manifest "$SCRIPT_DIR/AndroidManifest.xml" \
-	--version-code 1 --version-name 1 \
+	--version-code 2 --version-name 2 \
 	--min-sdk-version 26 --target-sdk-version 36
 zip -q -j "$OUT/unsigned.apk" "$OUT/dex/classes.dex"
 "$APKSIGNER" sign --key "$KEY" --cert "$CERT" --out "$APK" "$OUT/unsigned.apk"

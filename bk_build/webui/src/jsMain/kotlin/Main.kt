@@ -93,6 +93,7 @@ private const val FONT_URL = "composeResources/org.bkkernel.control.generated.re
 
 private external fun bkExec(command: String): Promise<dynamic>
 private external fun bkExportLog(command: String): Promise<dynamic>
+private external fun bkToast(message: String)
 private external fun bkReducedMotion(): Boolean
 private external fun bkThemeSeed(): Int
 
@@ -261,8 +262,10 @@ private fun ControlScreen() {
     }
 
     fun saveLogs() {
+        bkToast("正在导出日志...")
         scope.launch {
             busy = true
+            message = "正在整理日志"
             runCatching {
                 val raw = bkExportLog("$BKCTL collect-log").await()
                 ExecResult(

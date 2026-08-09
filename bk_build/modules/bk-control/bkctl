@@ -12,7 +12,9 @@ REB_FORCE=$STATE_DIR/Re.burnout-mode.force
 REB_DISABLE=$STATE_DIR/Re.burnout-mode.disabled
 KEYBOARD_NODE=/sys/devices/platform/soc/soc:xiaomi_keyboard/xiaomi_keyboard_enabled
 EXPORT_PACKAGE=org.bkkernel.logexport
-EXPORT_DIR=/data/user/0/$EXPORT_PACKAGE/files
+EXPORT_DIR=
+EXPORT_UID=
+EXPORT_CONTEXT=
 
 die()
 {
@@ -178,23 +180,59 @@ get_all()
 	printf 'swappiness=%s\n' "$(cat /proc/sys/vm/swappiness 2>/dev/null || config_get swappiness)"
 }
 
-collect_log()
+resolve_log_exporter()
 {
-	pm path "$EXPORT_PACKAGE" >/dev/null 2>&1 || die 'log exporter is not installed'
-	BK_EXPORT_UID=$(dumpsys package "$EXPORT_PACKAGE" 2>/dev/null | \
-		awk -F= '/^[[:space:]]*(userId|appId)=/{ sub(/ .*/, "", $2); print $2; exit }')
-	case "$BK_EXPORT_UID" in
+	pm path "$EXPORT_PACKAGE" >/dev/null 2>&1 || \
+		die 'log exporter is not installed'
+	BK_EXPORT_INFO=$STATE_DIR/.log-exporter-info.$$
+	dumpsys package "$EXPORT_PACKAGE" > "$BK_EXPORT_INFO" 2>/dev/null || {
+		rm -f "$BK_EXPORT_INFO"
+		die 'cannot query log exporter'
+	}
+	EXPORT_UID=$(awk -F= '/^[[:space:]]*(userId|appId)=/{
+		sub(/[[:space:]].*/, "", $2); print $2; exit
+	}' "$BK_EXPORT_INFO")
+	BK_EXPORT_DATA=$(awk -F= '/^[[:space:]]*dataDir=/{
+		sub(/[[:space:]].*/, "", $2); print $2; exit
+	}' "$BK_EXPORT_INFO")
+	rm -f "$BK_EXPORT_INFO"
+	case "$EXPORT_UID" in
 		''|*[!0-9]*) die 'cannot resolve log exporter uid' ;;
 	esac
+	[ -d "$BK_EXPORT_DATA" ] || BK_EXPORT_DATA=/data/user/0/$EXPORT_PACKAGE
+	[ -d "$BK_EXPORT_DATA" ] || die 'log exporter data is unavailable'
+	EXPORT_DIR=$BK_EXPORT_DATA/files
+	EXPORT_CONTEXT=$(ls -Zd "$BK_EXPORT_DATA" 2>/dev/null | awk '{ print $1; exit }')
+}
+
+apply_export_context()
+{
+	[ -n "$EXPORT_CONTEXT" ] || return 0
+	chcon "$EXPORT_CONTEXT" "$1" >/dev/null 2>&1 || true
+}
+
+run_dumpsys()
+{
+	if command -v timeout >/dev/null 2>&1; then
+		timeout 8 dumpsys "$@"
+	else
+		dumpsys "$@"
+	fi
+}
+
+collect_log()
+{
+	resolve_log_exporter
 	BK_LOG_STAMP=$(date '+%Y%m%d-%H%M%S')
 	BK_LOG_NAME=bkk-control-$BK_LOG_STAMP.tar.gz
 	BK_LOG_FILE=$EXPORT_DIR/$BK_LOG_NAME
 	BK_LOG_TMP=$EXPORT_DIR/.$BK_LOG_NAME.$$
 	BK_LOG_WORK=$STATE_DIR/.log-export-$$
 	mkdir -p "$EXPORT_DIR" "$BK_LOG_WORK" || die 'cannot prepare log export'
-	chown "$BK_EXPORT_UID:$BK_EXPORT_UID" "$EXPORT_DIR" 2>/dev/null || true
+	chown "$EXPORT_UID:$EXPORT_UID" "$EXPORT_DIR" 2>/dev/null || true
 	chmod 0700 "$EXPORT_DIR" 2>/dev/null || true
 	restorecon -RF "$EXPORT_DIR" >/dev/null 2>&1 || true
+	apply_export_context "$EXPORT_DIR"
 	find "$EXPORT_DIR" -type f -name 'bkk-control-*.tar.gz' -delete 2>/dev/null || true
 	{
 		echo '== kernel =='
@@ -234,7 +272,23 @@ collect_log()
 		dumpsys meminfo com.android.systemui 2>/dev/null
 		dumpsys gfxinfo com.miui.home framestats 2>/dev/null
 		dumpsys gfxinfo com.android.systemui framestats 2>/dev/null
+		echo '== touch event monitor =='
+		ps -A -T -o PID,TID,PPID,UID,STAT,PR,NI,CPU,COMM,ARGS 2>/dev/null | \
+			grep toucheventcheck 2>/dev/null
+		for BK_TOUCH_NODE in suspend_state touch_thp_cmd_ready abnormal_event; do
+			[ -r "/sys/class/touch/touch_dev/$BK_TOUCH_NODE" ] && \
+				printf '%s=%s\n' "$BK_TOUCH_NODE" \
+				"$(cat "/sys/class/touch/touch_dev/$BK_TOUCH_NODE" 2>/dev/null)"
+		done
 	} > "$BK_LOG_WORK/runtime.txt" 2>&1
+	{
+		run_dumpsys power
+		echo '== display =='
+		run_dumpsys display
+		echo '== input =='
+		run_dumpsys input
+	} > "$BK_LOG_WORK/power-display-input.txt" 2>&1 || true
+	cat /proc/bus/input/devices > "$BK_LOG_WORK/input-devices.txt" 2>&1 || true
 	getprop > "$BK_LOG_WORK/properties.txt" 2>&1 || true
 	dmesg > "$BK_LOG_WORK/dmesg-current.log" 2>&1 || true
 	logcat -b all -d -v threadtime > "$BK_LOG_WORK/logcat-all.log" 2>&1 || true
@@ -248,9 +302,12 @@ collect_log()
 		"$CONFIG" \
 		"$REB_STATUS" \
 		"$STATE_DIR/Re.burnout-mode.log" \
+		"$STATE_DIR/bk-wake-guard.log" \
 		"$STATE_DIR/zram-writeback.log"; do
 		[ -f "$BK_RUNTIME_LOG" ] && cp -f "$BK_RUNTIME_LOG" "$BK_LOG_WORK/"
 	done
+	[ -d "$STATE_DIR/wake-guard-last" ] && \
+		cp -R "$STATE_DIR/wake-guard-last" "$BK_LOG_WORK/"
 	tar -czf "$BK_LOG_TMP" -C "$BK_LOG_WORK" . 2>/dev/null || {
 		rm -f "$BK_LOG_TMP"
 		rm -rf "$BK_LOG_WORK"
@@ -258,9 +315,9 @@ collect_log()
 	}
 	rm -rf "$BK_LOG_WORK"
 	mv -f "$BK_LOG_TMP" "$BK_LOG_FILE" || die 'cannot save logs'
-	chown "$BK_EXPORT_UID:$BK_EXPORT_UID" "$BK_LOG_FILE" 2>/dev/null || true
+	chown "$EXPORT_UID:$EXPORT_UID" "$BK_LOG_FILE" 2>/dev/null || true
 	chmod 0600 "$BK_LOG_FILE" 2>/dev/null || true
-	restorecon "$BK_LOG_FILE" >/dev/null 2>&1 || true
+	apply_export_context "$BK_LOG_FILE"
 	printf 'name=%s\n' "$BK_LOG_NAME"
 	printf 'path=%s\n' "$BK_LOG_FILE"
 }
@@ -271,6 +328,7 @@ cleanup_log()
 		bkk-control-[0-9]*.tar.gz) ;;
 		*) return 1 ;;
 	esac
+	resolve_log_exporter
 	rm -f "$EXPORT_DIR/$1"
 }
 
@@ -280,9 +338,10 @@ open_log()
 		bkk-control-[0-9]*.tar.gz) ;;
 		*) return 1 ;;
 	esac
+	resolve_log_exporter
 	[ -f "$EXPORT_DIR/$1" ] || return 1
 	am start --user 0 -n "$EXPORT_PACKAGE/.ExportActivity" \
-		--es source "$EXPORT_DIR/$1" --es name "$1" >/dev/null 2>&1 || return 1
+		-f 0x10000000 --es name "$1" >/dev/null 2>&1 || return 1
 	echo '请选择日志保存位置'
 }
 

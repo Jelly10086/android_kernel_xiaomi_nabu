@@ -48,6 +48,13 @@
     return opened;
   };
 
+  global.bkToast = function (message) {
+    try {
+      ksu.toast(String(message));
+    } catch (_) {
+    }
+  };
+
   global.bkReducedMotion = function () {
     return global.matchMedia("(prefers-reduced-motion: reduce)").matches;
   };

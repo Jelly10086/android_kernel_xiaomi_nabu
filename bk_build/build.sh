@@ -9,7 +9,7 @@ else
 fi
 ARCH=${ARCH:-arm64}
 DEFCONFIG=${DEFCONFIG:-nabu_defconfig}
-OUT_DIR=${OUT_DIR:-/home/rinnrei/Project/uwuAP-temp/out/nabu-4.14.336-b1}
+OUT_DIR=${OUT_DIR:-/home/rinnrei/Project/uwuAP-temp/out/nabu-4.14.336-b2w1}
 JOBS=${JOBS:-4}
 CLANG_DIR=${CLANG_DIR:-/home/rinnrei/Project/uwuAP-temp/toolchains/aosp-clang-r547379}
 GCC64_DIR=${GCC64_DIR:-/home/rinnrei/Project/uwuAOSP/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9}
@@ -237,7 +237,7 @@ grep -Eq '(^|[[:space:]])pid[[:space:]]*;' \
   echo "BTF task_struct::pid is missing" >&2; exit 1;
 }
 kernel_release=$(make_kernel -s kernelrelease)
-[ "$kernel_release" = "4.14.336_bk-Kernel_17.0-b1" ] || {
+[ "$kernel_release" = "4.14.336_bk-Kernel_17.0-b2w1" ] || {
   echo "unexpected kernel release: $kernel_release" >&2; exit 1;
 }
 
@@ -254,6 +254,18 @@ stage "Generate" "生成bk-ZRAM_Tool"
     echo "invalid zram helper architecture" >&2; exit 1;
   }
 chmod 0755 "$OUT_DIR/artifacts/bk-zram-setup"
+"$CLANG_DIR/bin/clang" --target=aarch64-linux-android \
+  -Oz -ffreestanding -fno-builtin -fno-stack-protector \
+  -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-pie \
+  -nostdlib -static -fuse-ld=lld -Wl,-e,_start -Wl,--build-id=none \
+  -Wl,-z,max-page-size=4096 \
+  "$SCRIPT_DIR/tools/bk-keyboard-monitor.c" \
+  -o "$OUT_DIR/artifacts/bk-keyboard-monitor"
+"$CLANG_DIR/bin/llvm-objdump" -f "$OUT_DIR/artifacts/bk-keyboard-monitor" | \
+  grep -F 'architecture: aarch64' >/dev/null || {
+    echo "invalid keyboard monitor architecture" >&2; exit 1;
+  }
+chmod 0755 "$OUT_DIR/artifacts/bk-keyboard-monitor"
 
 dirty_diff_sha=$(git -C "$KERNEL_DIR" diff --binary HEAD -- | sha256sum | awk '{print $1}')
 ksu_tree_sha=$(
@@ -288,6 +300,7 @@ git -C "$KERNEL_DIR" ls-files --others --exclude-standard > \
   echo "PBRP_RAMDISK_SHA256=15ae763c1f5b93ae48bcd007ff1f66871873aaee5b3a32852acbbf75b897fc54"
   echo "PBRP_RAMDISK_GZIP_SHA256=248feef8879116c86df1729ecf9595b4be50834dd5bd66fe5732953cafaa4602"
   echo "ZRAM_SETUP_SHA256=$(sha256sum "$OUT_DIR/artifacts/bk-zram-setup" | awk '{print $1}')"
+  echo "KEYBOARD_MONITOR_SHA256=$(sha256sum "$OUT_DIR/artifacts/bk-keyboard-monitor" | awk '{print $1}')"
   echo "CLANG=$CLANG_DIR/bin/clang"
   "$CLANG_DIR/bin/clang" --version | head -1
   if [ -n "$CCACHE" ]; then
@@ -303,7 +316,8 @@ git -C "$KERNEL_DIR" ls-files --others --exclude-standard > \
 cp "$OUT_DIR/nabu-a17.config" "$OUT_DIR/artifacts/nabu-a17.config"
 (cd "$OUT_DIR/artifacts" && \
   sha256sum Image.gz dtb dtbo.img dtbo-dump.txt btf-task_struct.txt \
-    build-info.txt nabu-a17.config untracked-sources.txt bk-zram-setup) > \
+    build-info.txt nabu-a17.config untracked-sources.txt bk-zram-setup \
+    bk-keyboard-monitor) > \
   "$OUT_DIR/artifacts/SHA256SUMS"
 stage "Package" "打包AnyKernel3包"
 package_path=$(KERNEL_DIR="$KERNEL_DIR" OUT_DIR="$OUT_DIR" \

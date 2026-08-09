@@ -8,6 +8,7 @@ export ZIPFILE="$3";
 BOOTMODE=false;
 ps | grep zygote | grep -v grep >/dev/null && BOOTMODE=true;
 $BOOTMODE || ps -A 2>/dev/null | grep zygote | grep -v grep >/dev/null && BOOTMODE=true;
+export BOOTMODE;
 
 DIR=/sdcard;
 $BOOTMODE || DIR=$(dirname "$ZIPFILE");
@@ -19,8 +20,12 @@ $BOOTMODE || DIR=$(dirname "$ZIPFILE");
 
 ui_print() {
   until [ ! "$1" ]; do
-    echo "ui_print $1
-      ui_print" >> /proc/self/fd/$OUTFD;
+    if $BOOTMODE; then
+      echo "$1";
+    else
+      echo "ui_print $1
+        ui_print" >> /proc/self/fd/$OUTFD;
+    fi;
     shift;
   done;
 }
@@ -31,7 +36,7 @@ ui_printfile() {
     ui_print "$losrpad$line";
   done < $1;
 }
-show_progress() { echo "progress $1 $2" >> /proc/self/fd/$OUTFD; }
+show_progress() { $BOOTMODE || echo "progress $1 $2" >> /proc/self/fd/$OUTFD; }
 file_getprop() { grep "^$2=" "$1" | tail -n1 | cut -d= -f2-; }
 find_slot() {
   local slot=$(getprop ro.boot.slot_suffix 2>/dev/null);

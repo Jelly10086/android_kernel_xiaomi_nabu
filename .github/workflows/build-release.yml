@@ -124,7 +124,7 @@ jobs:
         run: |
           set -euo pipefail
           package=$(find "$OUT_DIR/packages" -maxdepth 1 -type f \
-            -name 'bk-Kernel_nabu-A17-Hyper-b1-*.zip' -print -quit)
+            -name 'bk-Kernel_nabu-A17-Hyper-b2w1-*.zip' -print -quit)
           test -n "$package"
           test -f "$package.sha256"
           unzip -t "$package" >/dev/null
@@ -137,7 +137,7 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: bk-Kernel_nabu-A17-Hyper-b1
+          name: bk-Kernel_nabu-A17-Hyper-b2w1
           path: |
             ${{ steps.package.outputs.package }}
             ${{ steps.package.outputs.checksum }}
@@ -164,7 +164,7 @@ jobs:
           fi
           notes="${RUNNER_TEMP}/release-notes.md"
           {
-            echo "Kernel: 4.14.336_bk-Kernel_17.0-b1"
+            echo "Kernel: 4.14.336_bk-Kernel_17.0-b2w1"
             echo "Target: Xiaomi Pad 5 (nabu)"
             echo "Build: GitHub Actions run ${GITHUB_RUN_NUMBER}"
             echo "Commit: ${GITHUB_SHA}"

@@ -2122,7 +2122,10 @@ static void __migrate_hrtimers(unsigned int scpu, bool remove_pinned)
 	/* Check, if we got expired work to do */
 	__hrtimer_peek_ahead_timers();
 	local_irq_restore(flags);
-	local_bh_enable();
+	if (irqs_disabled())
+		_local_bh_enable();
+	else
+		local_bh_enable();
 }
 
 int hrtimers_dead_cpu(unsigned int scpu)

@@ -1,0 +1,352 @@
+#!/system/bin/sh
+
+PATH=/system/bin:/system/xbin:/vendor/bin:/data/adb/ksu/bin
+export PATH
+umask 077
+
+STATE_DIR=/data/adb/bk-kernel
+CONFIG=$STATE_DIR/control.conf
+CONFIG_TMP=$STATE_DIR/control.conf.$$
+REB_STATUS=$STATE_DIR/Re.burnout-mode.status
+REB_FORCE=$STATE_DIR/Re.burnout-mode.force
+REB_DISABLE=$STATE_DIR/Re.burnout-mode.disabled
+KEYBOARD_NODE=/sys/devices/platform/soc/soc:xiaomi_keyboard/xiaomi_keyboard_enabled
+EXPORT_PACKAGE=org.bkkernel.logexport
+EXPORT_DIR=/data/user/0/$EXPORT_PACKAGE/files
+
+die()
+{
+	echo "$*" >&2
+	exit 1
+}
+
+write_node()
+{
+	[ -w "$1" ] || return 1
+	printf '%s\n' "$2" > "$1"
+}
+
+config_init()
+{
+	mkdir -p "$STATE_DIR" || return 1
+	[ -f "$CONFIG" ] && return 0
+	{
+		echo 'audio_boost=1'
+		echo 'protected_writeback=1'
+		echo 'widget_boost=1'
+		echo 'touch_firmware=modern'
+		echo 'swappiness=180'
+		echo 'mode=auto'
+	} > "$CONFIG_TMP" || return 1
+	mv -f "$CONFIG_TMP" "$CONFIG"
+}
+
+config_get()
+{
+	while IFS='=' read -r BK_KEY BK_VALUE; do
+		[ "$BK_KEY" = "$1" ] && {
+			printf '%s\n' "$BK_VALUE"
+			return 0
+		}
+	done < "$CONFIG"
+	return 1
+}
+
+config_set()
+{
+	BK_SET_KEY=$1
+	BK_SET_VALUE=$2
+	awk -F= -v key="$BK_SET_KEY" -v value="$BK_SET_VALUE" '
+		BEGIN { found = 0 }
+		$1 == key { print key "=" value; found = 1; next }
+		{ print }
+		END { if (!found) print key "=" value }
+	' "$CONFIG" > "$CONFIG_TMP" || return 1
+	mv -f "$CONFIG_TMP" "$CONFIG"
+}
+
+apply_swappiness()
+{
+	write_node /proc/sys/vm/swappiness "$1" || return 1
+	for BK_NODE in \
+		/dev/memcg/memory.swappiness \
+		/dev/memcg/apps/memory.swappiness \
+		/dev/memcg/system/memory.swappiness \
+		/sys/fs/cgroup/bg/memory.swappiness; do
+		[ -w "$BK_NODE" ] && write_node "$BK_NODE" "$1"
+	done
+}
+
+touch_node()
+{
+	for BK_NODE in \
+		/sys/devices/virtual/touch/bk_touch_firmware \
+		/sys/bus/spi/devices/*/panel_info/bk_touch_firmware \
+		/sys/bus/i2c/devices/*/panel_info/bk_touch_firmware \
+		/sys/bus/i2c/devices/*/bk_touch_firmware; do
+		[ -e "$BK_NODE" ] && {
+			printf '%s\n' "$BK_NODE"
+			return 0
+		}
+	done
+	return 1
+}
+
+apply_mode()
+{
+	case "$1" in
+		auto)
+			rm -f "$REB_DISABLE"
+			printf '%s\n' auto > "$REB_FORCE"
+			;;
+		force)
+			rm -f "$REB_DISABLE"
+			printf '%s\n' 1 > "$REB_FORCE"
+			;;
+		disabled)
+			: > "$REB_DISABLE"
+			printf '%s\n' 0 > "$REB_FORCE"
+			;;
+		*) return 1 ;;
+	esac
+}
+
+set_value()
+{
+	BK_NAME=$1
+	BK_VALUE=$2
+	case "$BK_NAME" in
+		audio_boost|protected_writeback|widget_boost)
+			case "$BK_VALUE" in 0|1) ;; *) return 1 ;; esac
+			config_set "$BK_NAME" "$BK_VALUE"
+			;;
+		keyboard_enabled)
+			case "$BK_VALUE" in 0|1) ;; *) return 1 ;; esac
+			write_node "$KEYBOARD_NODE" "$BK_VALUE"
+			;;
+		touch_firmware)
+			case "$BK_VALUE" in modern|miui125) ;; *) return 1 ;; esac
+			config_set "$BK_NAME" "$BK_VALUE" || return 1
+			BK_TOUCH_NODE=$(touch_node 2>/dev/null) || return 0
+			write_node "$BK_TOUCH_NODE" "$BK_VALUE"
+			;;
+		swappiness)
+			case "$BK_VALUE" in 160|180) ;; *) return 1 ;; esac
+			config_set "$BK_NAME" "$BK_VALUE" || return 1
+			apply_swappiness "$BK_VALUE"
+			;;
+		mode)
+			case "$BK_VALUE" in auto|force|disabled) ;; *) return 1 ;; esac
+			config_set "$BK_NAME" "$BK_VALUE" || return 1
+			apply_mode "$BK_VALUE"
+			;;
+		*) return 1 ;;
+	esac
+	: > "$STATE_DIR/control.reload"
+}
+
+get_all()
+{
+	BK_MODE=$(config_get mode 2>/dev/null)
+	BK_RUNTIME_MODE=unknown
+	if [ -r "$REB_STATUS" ]; then
+		BK_RUNTIME_MODE=$(awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^mode=/) { sub(/^mode=/, "", $i); print $i; exit } }' "$REB_STATUS")
+	fi
+	BK_KEYBOARD=0
+	[ -r "$KEYBOARD_NODE" ] && BK_KEYBOARD=$(cat "$KEYBOARD_NODE" 2>/dev/null)
+	BK_TOUCH=$(config_get touch_firmware 2>/dev/null)
+	BK_TOUCH_NODE=$(touch_node 2>/dev/null) || true
+	[ -n "$BK_TOUCH_NODE" ] && BK_TOUCH_LIVE=$(cat "$BK_TOUCH_NODE" 2>/dev/null)
+	[ -n "${BK_TOUCH_LIVE:-}" ] && BK_TOUCH=$BK_TOUCH_LIVE
+	BK_SYSTEM_VERSION=$(getprop ro.system.build.version.incremental 2>/dev/null)
+	[ -n "$BK_SYSTEM_VERSION" ] || \
+		BK_SYSTEM_VERSION=$(getprop ro.mi.os.version.name 2>/dev/null)
+	BK_ANDROID_VERSION=$(getprop ro.build.version.release 2>/dev/null)
+	BK_ANDROID_SDK=$(getprop ro.build.version.sdk 2>/dev/null)
+	[ -n "$BK_ANDROID_SDK" ] && \
+		BK_ANDROID_VERSION="$BK_ANDROID_VERSION (API $BK_ANDROID_SDK)"
+	printf 'system_version=%s\n' "${BK_SYSTEM_VERSION:-unknown}"
+	printf 'android_version=%s\n' "${BK_ANDROID_VERSION:-unknown}"
+	printf 'kernel=%s\n' "$(uname -r)"
+	printf 'mode=%s\n' "${BK_MODE:-unknown}"
+	printf 'runtime_mode=%s\n' "${BK_RUNTIME_MODE:-unknown}"
+	printf 'keyboard_enabled=%s\n' "${BK_KEYBOARD:-0}"
+	printf 'audio_boost=%s\n' "$(config_get audio_boost 2>/dev/null || echo 1)"
+	printf 'protected_writeback=%s\n' "$(config_get protected_writeback 2>/dev/null || echo 1)"
+	printf 'widget_boost=%s\n' "$(config_get widget_boost 2>/dev/null || echo 1)"
+	printf 'touch_firmware=%s\n' "${BK_TOUCH:-modern}"
+	printf 'swappiness=%s\n' "$(cat /proc/sys/vm/swappiness 2>/dev/null || config_get swappiness)"
+}
+
+collect_log()
+{
+	pm path "$EXPORT_PACKAGE" >/dev/null 2>&1 || die 'log exporter is not installed'
+	BK_EXPORT_UID=$(dumpsys package "$EXPORT_PACKAGE" 2>/dev/null | \
+		awk -F= '/^[[:space:]]*(userId|appId)=/{ sub(/ .*/, "", $2); print $2; exit }')
+	case "$BK_EXPORT_UID" in
+		''|*[!0-9]*) die 'cannot resolve log exporter uid' ;;
+	esac
+	BK_LOG_STAMP=$(date '+%Y%m%d-%H%M%S')
+	BK_LOG_NAME=bkk-control-$BK_LOG_STAMP.tar.gz
+	BK_LOG_FILE=$EXPORT_DIR/$BK_LOG_NAME
+	BK_LOG_TMP=$EXPORT_DIR/.$BK_LOG_NAME.$$
+	BK_LOG_WORK=$STATE_DIR/.log-export-$$
+	mkdir -p "$EXPORT_DIR" "$BK_LOG_WORK" || die 'cannot prepare log export'
+	chown "$BK_EXPORT_UID:$BK_EXPORT_UID" "$EXPORT_DIR" 2>/dev/null || true
+	chmod 0700 "$EXPORT_DIR" 2>/dev/null || true
+	restorecon -RF "$EXPORT_DIR" >/dev/null 2>&1 || true
+	find "$EXPORT_DIR" -type f -name 'bkk-control-*.tar.gz' -delete 2>/dev/null || true
+	{
+		echo '== kernel =='
+		uname -a
+		printf 'slot=%s\n' "$(getprop ro.boot.slot_suffix 2>/dev/null)"
+		printf 'boot_completed=%s\n' "$(getprop sys.boot_completed 2>/dev/null)"
+		printf 'selinux=%s\n' "$(getenforce 2>/dev/null)"
+		echo
+		echo '== bkk-control =='
+		get_all
+		[ -r "$CONFIG" ] && cat "$CONFIG"
+		[ -r "$REB_STATUS" ] && cat "$REB_STATUS"
+	} > "$BK_LOG_WORK/overview.txt" 2>&1
+	{
+		echo '== memory =='
+		cat /proc/meminfo
+		cat /proc/vmstat
+		cat /proc/swaps
+		for BK_LOG_NODE in disksize mem_used_total compr_data_size \
+			orig_data_size backing_dev bd_stat writeback_limit \
+			writeback_limit_enable; do
+			[ -r "/sys/block/zram0/$BK_LOG_NODE" ] && \
+				printf '%s=%s\n' "$BK_LOG_NODE" "$(cat "/sys/block/zram0/$BK_LOG_NODE")"
+		done
+		echo '== cgroups =='
+		cat /proc/cgroups
+		cat /proc/mounts
+		for BK_LOG_CPUSET in background system-background foreground \
+			audio-app top-app; do
+			[ -r "/dev/cpuset/$BK_LOG_CPUSET/cpus" ] && \
+				printf '%s=%s\n' "$BK_LOG_CPUSET" \
+				"$(cat "/dev/cpuset/$BK_LOG_CPUSET/cpus")"
+		done
+		echo '== processes =='
+		ps -A -T -o PID,TID,PPID,UID,STAT,PR,NI,CPU,COMM,ARGS 2>/dev/null
+		dumpsys meminfo com.miui.home 2>/dev/null
+		dumpsys meminfo com.android.systemui 2>/dev/null
+		dumpsys gfxinfo com.miui.home framestats 2>/dev/null
+		dumpsys gfxinfo com.android.systemui framestats 2>/dev/null
+	} > "$BK_LOG_WORK/runtime.txt" 2>&1
+	getprop > "$BK_LOG_WORK/properties.txt" 2>&1 || true
+	dmesg > "$BK_LOG_WORK/dmesg-current.log" 2>&1 || true
+	logcat -b all -d -v threadtime > "$BK_LOG_WORK/logcat-all.log" 2>&1 || true
+	[ -r /proc/last_kmsg ] && \
+		cat /proc/last_kmsg > "$BK_LOG_WORK/last-kmsg.log" 2>&1
+	mkdir -p "$BK_LOG_WORK/pstore"
+	for BK_PSTORE_FILE in /sys/fs/pstore/*; do
+		[ -f "$BK_PSTORE_FILE" ] && cp -f "$BK_PSTORE_FILE" "$BK_LOG_WORK/pstore/"
+	done
+	for BK_RUNTIME_LOG in \
+		"$CONFIG" \
+		"$REB_STATUS" \
+		"$STATE_DIR/Re.burnout-mode.log" \
+		"$STATE_DIR/zram-writeback.log"; do
+		[ -f "$BK_RUNTIME_LOG" ] && cp -f "$BK_RUNTIME_LOG" "$BK_LOG_WORK/"
+	done
+	tar -czf "$BK_LOG_TMP" -C "$BK_LOG_WORK" . 2>/dev/null || {
+		rm -f "$BK_LOG_TMP"
+		rm -rf "$BK_LOG_WORK"
+		die 'cannot package logs'
+	}
+	rm -rf "$BK_LOG_WORK"
+	mv -f "$BK_LOG_TMP" "$BK_LOG_FILE" || die 'cannot save logs'
+	chown "$BK_EXPORT_UID:$BK_EXPORT_UID" "$BK_LOG_FILE" 2>/dev/null || true
+	chmod 0600 "$BK_LOG_FILE" 2>/dev/null || true
+	restorecon "$BK_LOG_FILE" >/dev/null 2>&1 || true
+	printf 'name=%s\n' "$BK_LOG_NAME"
+	printf 'path=%s\n' "$BK_LOG_FILE"
+}
+
+cleanup_log()
+{
+	case "$1" in
+		bkk-control-[0-9]*.tar.gz) ;;
+		*) return 1 ;;
+	esac
+	rm -f "$EXPORT_DIR/$1"
+}
+
+open_log()
+{
+	case "$1" in
+		bkk-control-[0-9]*.tar.gz) ;;
+		*) return 1 ;;
+	esac
+	[ -f "$EXPORT_DIR/$1" ] || return 1
+	am start --user 0 -n "$EXPORT_PACKAGE/.ExportActivity" \
+		--es source "$EXPORT_DIR/$1" --es name "$1" >/dev/null 2>&1 || return 1
+	echo '请选择日志保存位置'
+}
+
+theme_seed()
+{
+	BK_THEME_SEED=$(cmd overlay lookup android \
+		android:color/system_accent1_500 2>/dev/null | tail -n 1)
+	case "$BK_THEME_SEED" in
+		\#??????|\#????????) printf '%s\n' "$BK_THEME_SEED" ;;
+		*) printf '%s\n' '#6750a4' ;;
+	esac
+}
+
+config_init || die 'cannot initialize configuration'
+
+case "${1:-}" in
+	get-all)
+		get_all
+		;;
+	get)
+		[ "$#" -eq 2 ] || die 'usage: bkctl get NAME'
+		case "$2" in
+			audio_boost|protected_writeback|widget_boost|touch_firmware|swappiness|mode)
+				config_get "$2" || exit 1 ;;
+			keyboard_enabled)
+				cat "$KEYBOARD_NODE" 2>/dev/null || echo 0 ;;
+			*) die 'unknown setting' ;;
+		esac
+		;;
+	set)
+		[ "$#" -eq 3 ] || die 'usage: bkctl set NAME VALUE'
+		set_value "$2" "$3" || die 'invalid or unavailable setting'
+		;;
+	apply)
+		apply_swappiness "$(config_get swappiness)" || true
+		apply_mode "$(config_get mode)" || true
+		BK_TOUCH=$(config_get touch_firmware)
+		BK_TOUCH_NODE=$(touch_node 2>/dev/null) || exit 1
+		write_node "$BK_TOUCH_NODE" "$BK_TOUCH"
+		;;
+	cycle-mode)
+		case "$(config_get mode)" in
+			auto) BK_NEXT=force ;;
+		force) BK_NEXT=disabled ;;
+		*) BK_NEXT=auto ;;
+		esac
+		set_value mode "$BK_NEXT" || die 'cannot change mode'
+		echo "$BK_NEXT"
+		;;
+	collect-log)
+		collect_log
+		;;
+	cleanup-log)
+		[ "$#" -eq 2 ] || die 'usage: bkctl cleanup-log NAME'
+		cleanup_log "$2" || die 'invalid log name'
+		;;
+	open-log)
+		[ "$#" -eq 2 ] || die 'usage: bkctl open-log NAME'
+		open_log "$2" || die 'cannot open log exporter'
+		;;
+	theme-seed)
+		theme_seed
+		;;
+	*)
+		die 'usage: bkctl {get-all|get|set|apply|cycle-mode|collect-log|cleanup-log|open-log|theme-seed}'
+		;;
+esac

@@ -33,11 +33,12 @@ REB_GPU_ENTER=70
 REB_GPU_EXIT=35
 REB_RUNNABLE_ENTER=7
 REB_RUNNABLE_EXIT=3
-REB_TEMP_ENTER=70000
-REB_TEMP_EXIT=80000
 REB_TASK_GUARD=6200
 REB_TASK_GUARD_SAMPLES=2
 REB_TASK_GUARD_COOLDOWN_SAMPLES=24
+REB_TOUCH_EVENT_CPU_LIMIT=80
+REB_TOUCH_EVENT_CPU_SAMPLES=2
+REB_TOUCH_EVENT_RESTART_LIMIT=1
 REB_WB_FLUSH_SAMPLES=12
 REB_WB_DAY_SECONDS=86400
 REB_WB_DAILY_PAGES=65536
@@ -558,7 +559,6 @@ reb_apply_base()
 	reb_apply_cpuset
 	reb_apply_memory
 	reb_apply_little_policy
-	reb_pin_ui
 }
 
 reb_read_tid_identity()
@@ -681,7 +681,7 @@ reb_restore_top_app()
 	rm -f "$REB_PINNED_FILE" "$REB_PINNED_TMP"
 	rm -f "$REB_UI_TIDS_FILE" "$REB_UI_TIDS_TMP"
 	rm -f "$REB_TOP_CPU_FILE" "$REB_TOP_CPU_TMP" "$REB_TOP_CPU_SORTED"
-	reb_pin_ui
+	reb_screen_on && reb_pin_ui
 }
 
 reb_save_node()
@@ -716,7 +716,7 @@ reb_save_mode_nodes()
 	reb_save_devfreq_min /sys/class/devfreq/1d84000.ufshc
 
 	REB_UFS=/sys/devices/platform/soc/1d84000.ufshc
-	for REB_UFS_NODE in max_bus_bw clkscale_enable clkgate_enable auto_hibern8; do
+	for REB_UFS_NODE in max_bus_bw; do
 		reb_save_node "$REB_UFS/$REB_UFS_NODE"
 	done
 
@@ -754,10 +754,6 @@ reb_enforce_mode_nodes()
 
 	REB_UFS=/sys/devices/platform/soc/1d84000.ufshc
 	reb_write "$REB_UFS/max_bus_bw" 1
-	# Disabling UFS clock scaling raises the clocks before it suspends scaling.
-	reb_write "$REB_UFS/clkscale_enable" 0
-	reb_write "$REB_UFS/clkgate_enable" 0
-	reb_write "$REB_UFS/auto_hibern8" 0
 
 	for REB_BUS in \
 		/sys/class/devfreq/soc:qcom,cpu-cpu-llcc-bw \
@@ -814,6 +810,65 @@ reb_leave_mode()
 reb_read_cpu_sample()
 {
 	awk '/^cpu / { idle=$5+$6; total=0; for (i=2; i<=NF; i++) total+=$i; printf "%.0f %.0f\n", total, idle; exit }' /proc/stat
+}
+
+reb_touchevent_guard_tick()
+{
+	REB_TOUCH_PID=$(pidof toucheventcheck 2>/dev/null)
+	set -- $REB_TOUCH_PID
+	REB_TOUCH_PID=${1:-}
+	case "$REB_TOUCH_PID" in
+		''|*[!0-9]*)
+			REB_TOUCH_LAST_PID=
+			REB_TOUCH_LAST_JIFFIES=
+			REB_TOUCH_HIGH_COUNT=0
+			return 0
+			;;
+	esac
+
+	REB_TOUCH_JIFFIES=0
+	for REB_TOUCH_TASK_STAT in /proc/$REB_TOUCH_PID/task/*/stat; do
+		[ -r "$REB_TOUCH_TASK_STAT" ] || continue
+		REB_TOUCH_STAT=
+		IFS= read -r REB_TOUCH_STAT < "$REB_TOUCH_TASK_STAT" 2>/dev/null || continue
+		REB_TOUCH_STAT=${REB_TOUCH_STAT#*) }
+		set -- $REB_TOUCH_STAT
+		[ "$#" -ge 13 ] || continue
+		case "${12}" in ''|*[!0-9]*) continue ;; esac
+		case "${13}" in ''|*[!0-9]*) continue ;; esac
+		REB_TOUCH_JIFFIES=$((REB_TOUCH_JIFFIES + ${12} + ${13}))
+	done
+
+	if [ "$REB_TOUCH_PID" = "$REB_TOUCH_LAST_PID" ] && \
+	   [ -n "$REB_TOUCH_LAST_JIFFIES" ] && [ "$REB_DELTA_TOTAL" -gt 0 ]; then
+		REB_TOUCH_DELTA=$((REB_TOUCH_JIFFIES - REB_TOUCH_LAST_JIFFIES))
+		[ "$REB_TOUCH_DELTA" -ge 0 ] || REB_TOUCH_DELTA=0
+		REB_TOUCH_CPU=$((800 * REB_TOUCH_DELTA / REB_DELTA_TOTAL))
+		if [ "$REB_TOUCH_CPU" -ge "$REB_TOUCH_EVENT_CPU_LIMIT" ]; then
+			REB_TOUCH_HIGH_COUNT=$((REB_TOUCH_HIGH_COUNT + 1))
+		else
+			REB_TOUCH_HIGH_COUNT=0
+		fi
+		if [ "$REB_TOUCH_HIGH_COUNT" -ge "$REB_TOUCH_EVENT_CPU_SAMPLES" ]; then
+			setprop ctl.stop toucheventcheck 2>/dev/null || true
+			kill "$REB_TOUCH_PID" 2>/dev/null || true
+			if [ "$REB_TOUCH_RESTARTS" -lt "$REB_TOUCH_EVENT_RESTART_LIMIT" ] && \
+			   [ -r /sys/class/touch/touch_dev/suspend_state ]; then
+				REB_TOUCH_RESTARTS=$((REB_TOUCH_RESTARTS + 1))
+				reb_log "restarted runaway toucheventcheck pid=$REB_TOUCH_PID cpu=$REB_TOUCH_CPU attempt=$REB_TOUCH_RESTARTS"
+				sleep 1
+				setprop ctl.start toucheventcheck 2>/dev/null || true
+			else
+				reb_log "stopped runaway toucheventcheck pid=$REB_TOUCH_PID cpu=$REB_TOUCH_CPU"
+			fi
+			REB_TOUCH_LAST_PID=
+			REB_TOUCH_LAST_JIFFIES=
+			REB_TOUCH_HIGH_COUNT=0
+			return 0
+		fi
+	fi
+	REB_TOUCH_LAST_PID=$REB_TOUCH_PID
+	REB_TOUCH_LAST_JIFFIES=$REB_TOUCH_JIFFIES
 }
 
 reb_gpu_busy()
@@ -903,10 +958,13 @@ REB_WIDGET_HIGH_COUNT=0
 REB_WIDGET_LOW_COUNT=0
 REB_HOME_PREV_JIFFIES=
 REB_PERF_TASKSET=
+REB_TOUCH_LAST_PID=
+REB_TOUCH_LAST_JIFFIES=
+REB_TOUCH_HIGH_COUNT=0
 trap 'reb_cleanup' EXIT HUP INT TERM
 
 case "$(uname -r)" in
-	4.14.336_bk-Kernel_17.0-b2w1) ;;
+	4.14.336_bk-Kernel_17.0-b2w3) ;;
 	*) reb_log "ignored on incompatible kernel $(uname -r)"; exit 0 ;;
 esac
 
@@ -939,22 +997,28 @@ if [ -r "$REB_RESTORE_FILE" ]; then
 fi
 
 reb_apply_base
+reb_screen_on && reb_pin_ui
 set -- $(reb_read_cpu_sample)
 REB_PREV_TOTAL=${1:-0}
 REB_PREV_IDLE=${2:-0}
 REB_HIGH_COUNT=0
 REB_LOW_COUNT=0
-REB_COOLDOWN=0
 REB_WARMUP=$REB_AUTO_DELAY_SAMPLES
 REB_WB_IDLE_COUNT=0
 REB_WB_MARKED=0
 REB_TASK_HIGH_COUNT=0
 REB_TASK_GUARD_COOLDOWN=0
+REB_TOUCH_RESTARTS=0
 reb_log "started"
 
 while :; do
 	sleep "$REB_INTERVAL"
 	reb_apply_base
+	REB_SCREEN_ACTIVE=0
+	if reb_screen_on; then
+		REB_SCREEN_ACTIVE=1
+		reb_pin_ui
+	fi
 
 	set -- $(reb_read_cpu_sample)
 	REB_TOTAL=${1:-0}
@@ -968,6 +1032,7 @@ while :; do
 	fi
 	REB_PREV_TOTAL=$REB_TOTAL
 	REB_PREV_IDLE=$REB_IDLE
+	reb_touchevent_guard_tick
 	REB_GPU_BUSY=$(reb_gpu_busy)
 	set -- $(reb_load_sample)
 	REB_RUNNABLE=${1:-0}
@@ -1016,24 +1081,13 @@ while :; do
 		continue
 	fi
 
-	if ! reb_screen_on; then
+	if [ "$REB_SCREEN_ACTIVE" -eq 0 ]; then
 		reb_leave_mode
 		REB_HIGH_COUNT=0
 		REB_LOW_COUNT=0
 		reb_write_status inactive
 		continue
 	fi
-
-	if [ "$REB_TEMP" -ge "$REB_TEMP_EXIT" ]; then
-		reb_leave_mode
-		REB_COOLDOWN=24
-		REB_HIGH_COUNT=0
-		REB_LOW_COUNT=0
-		reb_write_status cooling
-		continue
-	fi
-
-	[ "$REB_COOLDOWN" -gt 0 ] && REB_COOLDOWN=$((REB_COOLDOWN - 1))
 
 	if [ "$REB_CPU_BUSY" -ge "$REB_CPU_ENTER" ] || \
 	   [ "$REB_GPU_BUSY" -ge "$REB_GPU_ENTER" ] || \
@@ -1053,16 +1107,13 @@ while :; do
 
 	case "$REB_FORCE" in
 		1)
-			if [ "$REB_TEMP" -le "$REB_TEMP_ENTER" ]; then
-				reb_enter_mode
-			fi
+			reb_enter_mode
 			;;
 		0)
 			reb_leave_mode
 			;;
 		auto)
-			if [ "$REB_MODE" -eq 0 ] && [ "$REB_COOLDOWN" -eq 0 ] && \
-			   [ "$REB_TEMP" -le "$REB_TEMP_ENTER" ] && \
+			if [ "$REB_MODE" -eq 0 ] && \
 			   [ "$REB_HIGH_COUNT" -ge "$REB_ENTER_SAMPLES" ]; then
 				reb_enter_mode
 			elif [ "$REB_MODE" -eq 1 ] && \
@@ -1076,8 +1127,6 @@ while :; do
 		reb_refresh_top_app
 		reb_enforce_mode_nodes
 		reb_write_status active
-	elif [ "$REB_COOLDOWN" -gt 0 ]; then
-		reb_write_status cooling
 	else
 		reb_write_status inactive
 	fi

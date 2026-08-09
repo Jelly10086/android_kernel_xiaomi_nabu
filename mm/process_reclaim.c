@@ -33,6 +33,15 @@ DECLARE_WORK(swap_work, swap_fn);
 static int enable_process_reclaim;
 module_param_named(enable_process_reclaim, enable_process_reclaim, int, 0644);
 
+/* Abort only optional process reclaim work. Core reclaim threads are untouched. */
+static int cancel_process_reclaim;
+module_param_named(cancel_process_reclaim, cancel_process_reclaim, int, 0644);
+
+bool process_reclaim_should_abort(void)
+{
+	return READ_ONCE(cancel_process_reclaim);
+}
+
 /* The max number of pages tried to be reclaimed in a single run */
 int per_swap_size = SWAP_CLUSTER_MAX * 32;
 module_param_named(per_swap_size, per_swap_size, int, 0644);
@@ -120,10 +129,16 @@ static void swap_fn(struct work_struct *work)
 	int nr_to_reclaim;
 	int efficiency;
 
+	if (process_reclaim_should_abort())
+		return;
+
 	rcu_read_lock();
 	for_each_process(tsk) {
 		struct task_struct *p;
 		short oom_score_adj;
+
+		if (process_reclaim_should_abort())
+			break;
 
 		if (tsk->flags & PF_KTHREAD)
 			continue;
@@ -179,6 +194,12 @@ static void swap_fn(struct work_struct *work)
 	rcu_read_unlock();
 
 	while (si--) {
+		if (process_reclaim_should_abort()) {
+			while (si >= 0)
+				put_task_struct(selected[si--].p);
+			break;
+		}
+
 		nr_to_reclaim =
 			(selected[si].tasksize * per_swap_size) / total_sz;
 		/* scan atleast a page */
@@ -220,6 +241,8 @@ static int vmpressure_notifier(struct notifier_block *nb,
 	unsigned long pressure = action;
 
 	if (!enable_process_reclaim)
+		return 0;
+	if (process_reclaim_should_abort())
 		return 0;
 
 	if (!current_is_kswapd())

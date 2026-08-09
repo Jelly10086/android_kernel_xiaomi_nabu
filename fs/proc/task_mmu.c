@@ -1941,6 +1941,9 @@ struct reclaim_param reclaim_task_anon(struct task_struct *task,
 
 	down_read(&mm->mmap_sem);
 	for (vma = mm->mmap; vma; vma = vma->vm_next) {
+		if (process_reclaim_should_abort())
+			break;
+
 		if (is_vm_hugetlb_page(vma))
 			continue;
 

@@ -2742,6 +2742,7 @@ struct reclaim_param {
 };
 extern struct reclaim_param reclaim_task_anon(struct task_struct *task,
 		int nr_to_reclaim);
+extern bool process_reclaim_should_abort(void);
 #endif
 
 #endif /* __KERNEL__ */

@@ -987,9 +987,24 @@ return:
 int32_t nvt_update_firmware(const char *firmware_name)
 {
 	int32_t ret = 0;
+	const char *selected_name = firmware_name;
+	u8 requested_mode = NVT_TOUCH_FW_MODERN;
+	bool managed_firmware = false;
+
+	if (firmware_name && ts->fw_name &&
+	    !strcmp(firmware_name, (const char *)ts->fw_name)) {
+		managed_firmware = true;
+		requested_mode = READ_ONCE(ts->fw_mode_requested);
+		if (requested_mode == NVT_TOUCH_FW_MIUI125) {
+			if (!strcmp(firmware_name, "novatek_nt36523_fw01.bin"))
+				selected_name = "novatek_nt36523_fw01_0042.bin";
+			else if (!strcmp(firmware_name, "novatek_nt36523_fw02.bin"))
+				selected_name = "novatek_nt36523_fw02_0036.bin";
+		}
+	}
 
 	// request bin file in "/etc/firmware"
-	ret = update_firmware_request(firmware_name);
+	ret = update_firmware_request(selected_name);
 	if (ret) {
 		NVT_ERR("update_firmware_request failed. (%d)\n", ret);
 		goto request_firmware_fail;
@@ -1019,6 +1034,10 @@ int32_t nvt_update_firmware(const char *firmware_name)
 	ret = nvt_get_fw_info();
 	if (ret) {
 		NVT_ERR("nvt_get_fw_info failed. (%d)\n", ret);
+	}
+	if (!ret && managed_firmware) {
+		WRITE_ONCE(ts->fw_mode_applied, requested_mode);
+		WRITE_ONCE(ts->fw_mode_applied_valid, true);
 	}
 
 download_fail:

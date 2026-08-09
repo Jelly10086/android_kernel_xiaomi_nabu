@@ -125,6 +125,11 @@ enum nvt_ic_state {
 	NVT_IC_INIT,
 };
 
+enum nvt_touch_fw_mode {
+	NVT_TOUCH_FW_MODERN,
+	NVT_TOUCH_FW_MIUI125,
+};
+
 struct nvt_config_info {
 	u8 tp_vendor;
 	u8 tp_color;
@@ -159,6 +164,9 @@ struct nvt_ts_data {
 	struct nvt_config_info *config_array;
 	const u8 *fw_name;
 	const u8 *mp_name;
+	u8 fw_mode_requested;
+	u8 fw_mode_applied;
+	bool fw_mode_applied_valid;
 	bool lkdown_readed;
 	u8 lockdown_info[NVT_LOCKDOWN_SIZE];
 	uint8_t fw_ver;

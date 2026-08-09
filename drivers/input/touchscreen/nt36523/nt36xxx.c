@@ -206,14 +206,65 @@ static ssize_t nvt_panel_display_show(struct device *dev,
 	return snprintf(buf, PAGE_SIZE, "%c\n", ts->lockdown_info[1]);
 }
 
+static const char *nvt_touch_fw_mode_name(u8 mode)
+{
+	return mode == NVT_TOUCH_FW_MIUI125 ? "miui125" : "modern";
+}
+
+static ssize_t bk_touch_firmware_show(struct device *dev,
+				      struct device_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%s\n",
+			nvt_touch_fw_mode_name(READ_ONCE(ts->fw_mode_requested)));
+}
+
+static ssize_t bk_touch_firmware_store(struct device *dev,
+				       struct device_attribute *attr,
+				       const char *buf, size_t count)
+{
+	u8 mode;
+
+	if (sysfs_streq(buf, "modern"))
+		mode = NVT_TOUCH_FW_MODERN;
+	else if (sysfs_streq(buf, "miui125"))
+		mode = NVT_TOUCH_FW_MIUI125;
+	else
+		return -EINVAL;
+
+	WRITE_ONCE(ts->fw_mode_requested, mode);
+	return count;
+}
+
+static ssize_t bk_touch_firmware_status_show(struct device *dev,
+					     struct device_attribute *attr,
+					     char *buf)
+{
+	u8 requested = READ_ONCE(ts->fw_mode_requested);
+
+	if (!READ_ONCE(ts->fw_mode_applied_valid))
+		return scnprintf(buf, PAGE_SIZE, "requested=%s applied=unknown pending=1\n",
+				nvt_touch_fw_mode_name(requested));
+
+	return scnprintf(buf, PAGE_SIZE, "requested=%s applied=%s pending=%u\n",
+			nvt_touch_fw_mode_name(requested),
+			nvt_touch_fw_mode_name(READ_ONCE(ts->fw_mode_applied)),
+			requested != READ_ONCE(ts->fw_mode_applied));
+}
+
 static DEVICE_ATTR(panel_color, (S_IRUGO), nvt_panel_color_show, NULL);
 static DEVICE_ATTR(panel_vendor, (S_IRUGO), nvt_panel_vendor_show, NULL);
 static DEVICE_ATTR(panel_display, (S_IRUGO), nvt_panel_display_show, NULL);
+static DEVICE_ATTR(bk_touch_firmware, 0644, bk_touch_firmware_show,
+		   bk_touch_firmware_store);
+static DEVICE_ATTR(bk_touch_firmware_status, 0444,
+		   bk_touch_firmware_status_show, NULL);
 
 struct attribute *nvt_panel_attr[] = {
 	&dev_attr_panel_color.attr,
 	&dev_attr_panel_vendor.attr,
 	&dev_attr_panel_display.attr,
+	&dev_attr_bk_touch_firmware.attr,
+	&dev_attr_bk_touch_firmware_status.attr,
 	NULL,
 };
 
@@ -3004,6 +3055,9 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 	ts->gesture_command_delayed = -1;
 	init_completion(&ts->dev_pm_suspend_completion);
 	ts->fw_debug = false;
+	ts->fw_mode_requested = NVT_TOUCH_FW_MODERN;
+	ts->fw_mode_applied = NVT_TOUCH_FW_MODERN;
+	ts->fw_mode_applied_valid = false;
 
 #ifdef CONFIG_FACTORY_BUILD
 	ts->pen_input_dev_enable = 1;

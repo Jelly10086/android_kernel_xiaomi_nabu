@@ -1865,12 +1865,12 @@ static int do_execveat_common(int fd, struct filename *filename,
 		else if (unlikely(!strncmp(filename->name,
 					   HWCOMPOSER_BIN_PREFIX,
 					   strlen(HWCOMPOSER_BIN_PREFIX)))) {
-			current->flags |= PF_PERF_CRITICAL;
+			task_set_perf_critical(current);
 			set_cpus_allowed_ptr(current, cpu_perf_mask);
 		} else if (unlikely(!strncmp(filename->name,
 					   SURFACEFLINGER_BIN,
 					   strlen(SURFACEFLINGER_BIN)))) {
-			current->flags |= PF_PERF_CRITICAL;
+			task_set_perf_critical(current);
 			set_cpus_allowed_ptr(current, cpu_perf_mask);
 		}
 	}

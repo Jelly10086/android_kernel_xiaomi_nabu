@@ -1227,7 +1227,7 @@ static void affine_one_perf_thread(struct irqaction *action)
 	else
 		mask = cpu_prime_mask;
 
-	action->thread->flags |= PF_PERF_CRITICAL;
+	task_set_perf_critical(action->thread);
 	set_cpus_allowed_ptr(action->thread, mask);
 }
 
@@ -1236,7 +1236,7 @@ static void unaffine_one_perf_thread(struct irqaction *action)
 	if (!action->thread)
 		return;
 
-	action->thread->flags &= ~PF_PERF_CRITICAL;
+	task_clear_perf_critical(action->thread);
 	set_cpus_allowed_ptr(action->thread, cpu_all_mask);
 }
 

@@ -1192,7 +1192,7 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 	cpumask_t allowed_mask;
 
 	/* Don't allow perf-critical threads to have non-perf affinities */
-	if ((p->flags & PF_PERF_CRITICAL) && new_mask != cpu_lp_mask &&
+	if (task_perf_critical(p) && new_mask != cpu_lp_mask &&
 	    new_mask != cpu_perf_mask && new_mask != cpu_prime_mask)
 		return -EINVAL;
 
@@ -2417,6 +2417,7 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags,
 	 * TASK_WAKING such that we can unlock p->pi_lock before doing the
 	 * enqueue, such as ttwu_queue_wakelist().
 	 */
+	p->sched_contributes_to_load = !!task_contributes_to_load(p);
 	p->state = TASK_WAKING;
 
 #if SCHED_FEAT_TTWU_QUEUE
@@ -3789,14 +3790,6 @@ static void __sched notrace __schedule(bool preempt, bool spinning_lock)
 		if (unlikely(signal_pending_state(prev_state, prev))) {
 			prev->state = TASK_RUNNING;
 		} else {
-			prev->sched_contributes_to_load =
-				(prev_state & TASK_UNINTERRUPTIBLE) &&
-				!(prev_state & TASK_NOLOAD) &&
-				!(prev->flags & PF_FROZEN);
-
-			if (prev->sched_contributes_to_load)
-				rq->nr_uninterruptible++;
-
 			/*
 			 * __schedule()			ttwu()
 			 *   prev_state = prev->state;    if (p->on_rq && ...)

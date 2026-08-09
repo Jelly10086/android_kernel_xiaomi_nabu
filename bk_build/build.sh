@@ -9,7 +9,7 @@ else
 fi
 ARCH=${ARCH:-arm64}
 DEFCONFIG=${DEFCONFIG:-nabu_defconfig}
-OUT_DIR=${OUT_DIR:-/home/rinnrei/Project/uwuAP-temp/out/nabu-4.14.336-b2w1}
+OUT_DIR=${OUT_DIR:-/home/rinnrei/Project/uwuAP-temp/out/nabu-4.14.336-b2w3}
 JOBS=${JOBS:-4}
 CLANG_DIR=${CLANG_DIR:-/home/rinnrei/Project/uwuAP-temp/toolchains/aosp-clang-r547379}
 GCC64_DIR=${GCC64_DIR:-/home/rinnrei/Project/uwuAOSP/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9}
@@ -122,6 +122,12 @@ grep -qx '# CONFIG_LRU_GEN_ENABLED is not set' "$OUT_DIR/.config" || {
 }
 grep -qx 'CONFIG_LOCALVERSION=""' "$OUT_DIR/.config" || {
   echo "kernel local version is incorrect" >&2; exit 1;
+}
+grep -qx 'CONFIG_DEFAULT_NOOP=y' "$OUT_DIR/.config" || {
+  echo "UFS default I/O scheduler is not noop" >&2; exit 1;
+}
+grep -qx 'CONFIG_DEFAULT_IOSCHED="noop"' "$OUT_DIR/.config" || {
+  echo "default I/O scheduler name is not noop" >&2; exit 1;
 }
 grep -qx 'CONFIG_LOG_BUF_SHIFT=21' "$OUT_DIR/.config" || {
   echo "required config is not set: CONFIG_LOG_BUF_SHIFT=21" >&2; exit 1;
@@ -237,7 +243,7 @@ grep -Eq '(^|[[:space:]])pid[[:space:]]*;' \
   echo "BTF task_struct::pid is missing" >&2; exit 1;
 }
 kernel_release=$(make_kernel -s kernelrelease)
-[ "$kernel_release" = "4.14.336_bk-Kernel_17.0-b2w1" ] || {
+[ "$kernel_release" = "4.14.336_bk-Kernel_17.0-b2w3" ] || {
   echo "unexpected kernel release: $kernel_release" >&2; exit 1;
 }
 

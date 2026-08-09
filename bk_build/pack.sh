@@ -7,7 +7,7 @@ if [ -n "${KERNEL_DIR:-}" ]; then
 else
   KERNEL_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 fi
-OUT_DIR=${OUT_DIR:-/home/rinnrei/Project/uwuAP-temp/out/nabu-4.14.336-b2w1}
+OUT_DIR=${OUT_DIR:-/home/rinnrei/Project/uwuAP-temp/out/nabu-4.14.336-b2w3}
 ARTIFACTS=${ARTIFACTS:-$OUT_DIR/artifacts}
 PACKAGE_ROOT=${PACKAGE_ROOT:-$OUT_DIR/packages}
 TEMPLATE=$SCRIPT_DIR/anykernel.sh
@@ -100,6 +100,7 @@ chmod 0755 "$PACKAGE/module/bkctl" "$PACKAGE/module/service.sh" \
   "$PACKAGE/module/post-fs-data.sh" "$PACKAGE/module/action.sh" \
   "$PACKAGE/module/uninstall.sh" "$PACKAGE/module/scripts/bk-reburnout.sh" \
   "$PACKAGE/module/scripts/bk-zram-writeback.sh" \
+  "$PACKAGE/module/scripts/bk-wake-guard.sh" \
   "$PACKAGE/module/bin/bk-zram-setup" \
   "$PACKAGE/module/bin/bk-keyboard-monitor"
 cp -a "$ANYKERNEL_META_INF" "$PACKAGE/META-INF"
@@ -112,7 +113,8 @@ for entry in Image.gz dtb dtbo.img anykernel.sh tools/ak3-core.sh \
   module/webroot/index.html module/webroot/bkControl.js \
   module/webroot/bridge.js module/webroot/style.css \
   module/scripts/bk-reburnout.sh \
-  module/scripts/bk-zram-writeback.sh module/bin/bk-zram-setup \
+  module/scripts/bk-zram-writeback.sh module/scripts/bk-wake-guard.sh \
+  module/bin/bk-zram-setup \
   module/bin/bk-keyboard-monitor \
   module/bin/bkk-log-exporter.apk \
   recovery/ramdisk-recovery.cpio.gz \
@@ -240,6 +242,19 @@ unzip -p "$ZIP_PATH" module/bkctl | grep -F 'open-log)' >/dev/null || {
 unzip -p "$ZIP_PATH" module/service.sh | grep -F 'org.bkkernel.logexport' >/dev/null || {
   echo "bk-control log exporter installer is missing" >&2; exit 1;
 }
+unzip -p "$ZIP_PATH" module/post-fs-data.sh | \
+  grep -F '<bool name="support_usb_keyboard">true</bool>' >/dev/null || {
+  echo "Xiaomi USB keyboard feature setup is missing" >&2; exit 1;
+}
+unzip -p "$ZIP_PATH" module/post-fs-data.sh | \
+  grep -F "printf '%s\\n' noop > \"\$BK_UFS_SCHEDULER\"" >/dev/null || {
+  echo "UFS noop scheduler setup is missing" >&2; exit 1;
+}
+if unzip -p "$ZIP_PATH" module/scripts/bk-reburnout.sh | \
+  grep -E 'reb_write "\$REB_UFS/(clkscale_enable|clkgate_enable|auto_hibern8)"' >/dev/null; then
+  echo "runtime policy must not change the UFS power state machine" >&2
+  exit 1
+fi
 unzip -p "$ZIP_PATH" module/bkctl | grep -F 'theme-seed)' >/dev/null || {
   echo "bk-control dynamic color source is missing" >&2; exit 1;
 }

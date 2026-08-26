@@ -255,7 +255,7 @@ if unzip -Z1 "$ZIP_PATH" | grep -E '(^|/)recovery/' >/dev/null; then
   exit 1
 fi
 if unzip -p "$ZIP_PATH" anykernel.sh | \
-  grep -E 'PBRP|pbrp_|ramdisk-recovery|patch_cmdline androidboot\.force_normal_boot' >/dev/null; then
+  grep -E 'ramdisk-recovery|recovery/.*cpio|install_.*ramdisk' >/dev/null; then
   echo "AnyKernel must preserve the installed boot ramdisk" >&2
   exit 1
 fi

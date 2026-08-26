@@ -21,7 +21,7 @@ CCACHE=${CCACHE:-}
 CROSS_COMPILE=${CROSS_COMPILE:-aarch64-linux-androidkernel-}
 CROSS_COMPILE_ARM32=${CROSS_COMPILE_ARM32:-arm-linux-androideabi-}
 CLANG_TRIPLE=${CLANG_TRIPLE:-aarch64-linux-gnu-}
-FRAGMENT=${FRAGMENT:-$SCRIPT_DIR/configs/nabu-a17.config}
+FRAGMENT=${FRAGMENT:-$SCRIPT_DIR/configs/nabu-17.0.config}
 
 case "$JOBS" in ''|*[!0-9]*) echo "JOBS must be a positive integer" >&2; exit 2 ;; esac
 [ "$JOBS" -gt 0 ] || { echo "JOBS must be greater than zero" >&2; exit 2; }
@@ -163,7 +163,7 @@ grep -qx 'CONFIG_PANIC_TIMEOUT=-1' "$OUT_DIR/.config" || {
 grep -qx 'CONFIG_CMDLINE=""' "$OUT_DIR/.config" || {
   echo "legacy ramoops command line is still enabled" >&2; exit 1;
 }
-cp "$OUT_DIR/.config" "$OUT_DIR/nabu-a17.config"
+cp "$OUT_DIR/.config" "$OUT_DIR/nabu-17.0.config"
 
 # Build generated-header owners before the parallel object batch.
 stage "Build" "编译内核对象"
@@ -305,7 +305,7 @@ anykernel_template_sha=$(
   cd "$SCRIPT_DIR"
   {
     sha256sum anykernel.sh
-    find anykernel recovery -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+    find anykernel -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
   } | sha256sum | awk '{print $1}'
 )
 git -C "$KERNEL_DIR" ls-files --others --exclude-standard > \
@@ -325,9 +325,6 @@ git -C "$KERNEL_DIR" ls-files --others --exclude-standard > \
   echo "DROIDSPACES_COMMIT=7412f6fb732fe7f5e3dc6ac0848d82ef9ff98acf"
   echo "KERNELSU_TREE_SHA256=$ksu_tree_sha"
   echo "ANYKERNEL_TEMPLATE_SHA256=$anykernel_template_sha"
-  echo "PBRP_SOURCE_ZIP_SHA256=77a06f1bfdcd0d4e47c89d83f95a1b650217c067085808e361510461d9608203"
-  echo "PBRP_RAMDISK_SHA256=15ae763c1f5b93ae48bcd007ff1f66871873aaee5b3a32852acbbf75b897fc54"
-  echo "PBRP_RAMDISK_GZIP_SHA256=248feef8879116c86df1729ecf9595b4be50834dd5bd66fe5732953cafaa4602"
   echo "ZRAM_SETUP_SHA256=$(sha256sum "$OUT_DIR/artifacts/bk-zram-setup" | awk '{print $1}')"
   echo "KEYBOARD_MONITOR_SHA256=$(sha256sum "$OUT_DIR/artifacts/bk-keyboard-monitor" | awk '{print $1}')"
   echo "CLANG=$CLANG_DIR/bin/clang"
@@ -342,10 +339,10 @@ git -C "$KERNEL_DIR" ls-files --others --exclude-standard > \
   "$PAHOLE" --version
   echo "UNTRACKED_SOURCE_LIST=untracked-sources.txt"
 } > "$OUT_DIR/artifacts/build-info.txt"
-cp "$OUT_DIR/nabu-a17.config" "$OUT_DIR/artifacts/nabu-a17.config"
+cp "$OUT_DIR/nabu-17.0.config" "$OUT_DIR/artifacts/nabu-17.0.config"
 (cd "$OUT_DIR/artifacts" && \
   sha256sum Image.gz dtb dtbo.img dtbo-dump.txt btf-task_struct.txt \
-    build-info.txt nabu-a17.config untracked-sources.txt bk-zram-setup \
+    build-info.txt nabu-17.0.config untracked-sources.txt bk-zram-setup \
     bk-keyboard-monitor) > \
   "$OUT_DIR/artifacts/SHA256SUMS"
 stage "Package" "打包AnyKernel3包"

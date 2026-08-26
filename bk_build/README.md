@@ -1,4 +1,4 @@
-# nabu Android 17 kernel build
+# nabu Android 17.0 kernel build
 
 The default entry point is `nabu_defconfig`. The scripts do not flash, reboot,
 change swap, or touch a connected device.
@@ -27,16 +27,10 @@ and exceeds the hosted runner disk budget.
 
 The packaged `dtb` follows the HyperOS vendor_boot order: `sm8150.dtb`,
 `sm8150p.dtb`, `sm8150p-v2.dtb`, and `sm8150-v2.dtb`. The package targets
-`nabu` and handles boot and vendor_boot separately. Restore the boot image
-matching the installed system before installing from a flashed PBRP image;
-the installer rejects a boot image carrying `twrpfastboot=1`.
+`nabu` and handles boot and vendor_boot separately.
 
-The package embeds the fixed PBRP 4.0 recovery ramdisk from
-`PBRP-nabu-4.0-20241222-2341-UNOFFICIAL.zip`. It installs that ramdisk only to
-the active boot slot. It removes a hard-coded `androidboot.force_normal_boot`
-value and leaves normal/recovery selection to the nabu bootloader, matching the
-stock HyperOS boot header. The source ZIP and ramdisk hashes are recorded in
-`bk_build/recovery/README.md` and in every build's `build-info.txt`.
+The package does not replace or bundle a recovery ramdisk. Recovery images are
+built and distributed separately from the kernel package.
 
 The installer also places `bk-reburnout.sh` in KernelSU `service.d`. It applies
 the nabu cpuset layout and swappiness 180. Foreground and top-app tasks retain

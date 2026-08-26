@@ -76,6 +76,13 @@ struct pstore_info *psinfo;
 
 static char *backend;
 
+/* Keep ramoops available for post-reboot reads without allowing a recovery
+ * kernel's printk stream to overwrite the previous kernel's console record. */
+static bool pstore_no_console;
+module_param_named(no_console, pstore_no_console, bool, 0444);
+MODULE_PARM_DESC(no_console,
+		"do not register the pstore console frontend");
+
 /* Compression parameters */
 #ifdef CONFIG_PSTORE_ZLIB_COMPRESS
 #define COMPR_LEVEL 6
@@ -141,6 +148,8 @@ static bool pstore_cannot_wait(enum kmsg_dump_reason reason)
 		return true;
 
 	switch (reason) {
+	/* Oops runs with the architecture's die lock held. Never sleep here. */
+	case KMSG_DUMP_OOPS:
 	/* In panic case, other cpus are stopped by smp_send_stop(). */
 	case KMSG_DUMP_PANIC:
 	/* Emergency restart shouldn't be blocked. */
@@ -576,6 +585,16 @@ static void pstore_dump(struct kmsg_dumper *dumper,
 	}
 
 	up(&psinfo->buf_lock);
+
+	/*
+	 * Refresh a mounted pstore filesystem immediately after an Oops.  The
+	 * backend has already committed the record to ramoops, so this one-shot
+	 * work item is safe in process context and does not require the unsafe
+	 * periodic update timer.
+	 */
+	if (reason == KMSG_DUMP_OOPS && pstore_new_entry &&
+	    pstore_is_mounted())
+		schedule_work(&pstore_work);
 }
 
 static struct kmsg_dumper pstore_dumper = {
@@ -596,9 +615,13 @@ static void pstore_unregister_kmsg(void)
 }
 
 #ifdef CONFIG_PSTORE_CONSOLE
-static void pstore_console_write(struct console *con, const char *s, unsigned c)
+static void notrace pstore_console_write(struct console *con, const char *s,
+					 unsigned c)
 {
 	struct pstore_record record;
+
+	if (!c || !psinfo || !psinfo->write)
+		return;
 
 	pstore_record_init(&record, psinfo);
 	record.type = PSTORE_TYPE_CONSOLE;
@@ -662,6 +685,9 @@ out:
 int pstore_register(struct pstore_info *psi)
 {
 	struct module *owner = psi->owner;
+
+	if (pstore_no_console)
+		psi->flags &= ~PSTORE_FLAGS_CONSOLE;
 
 	if (backend && strcmp(backend, psi->name)) {
 		pr_warn("ignoring unexpected backend '%s'\n", psi->name);
@@ -825,7 +851,14 @@ void pstore_get_backend_records(struct pstore_info *psi,
 	if (!psi || !root)
 		return;
 
-	mutex_lock(&psi->read_mutex);
+	/* A runtime refresh must never wait behind a task that Oopsed while
+	 * reading pstore. The record is already persistent in the backend. */
+	if (quiet) {
+		if (!mutex_trylock(&psi->read_mutex))
+			return;
+	} else {
+		mutex_lock(&psi->read_mutex);
+	}
 	if (psi->open && psi->open(psi))
 		goto out;
 
@@ -878,6 +911,7 @@ out:
 
 static void pstore_dowork(struct work_struct *work)
 {
+	pstore_new_entry = 0;
 	pstore_get_records(1);
 }
 

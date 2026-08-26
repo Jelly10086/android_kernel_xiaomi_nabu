@@ -386,6 +386,8 @@ static int notrace ramoops_pstore_write(struct pstore_record *record)
 		if (!cxt->cprz)
 			return -ENOMEM;
 		persistent_ram_write(cxt->cprz, record->buf, record->size);
+		/* Make the live console record visible before a watchdog reset. */
+		wmb();
 		return 0;
 	} else if (record->type == PSTORE_TYPE_FTRACE) {
 		int zonenum;
@@ -442,6 +444,8 @@ static int notrace ramoops_pstore_write(struct pstore_record *record)
 	if (size + hlen > prz->buffer_size)
 		size = prz->buffer_size - hlen;
 	persistent_ram_write(prz, record->buf, size);
+	/* The next reset may happen immediately after an Oops. */
+	wmb();
 
 	cxt->dump_write_cnt = (cxt->dump_write_cnt + 1) % cxt->max_dump_cnt;
 
@@ -726,8 +730,14 @@ static int ramoops_parse_dt(struct platform_device *pdev,
 void notrace ramoops_console_write_buf(const char *buf, size_t size)
 {
 	struct ramoops_context *cxt = &oops_cxt;
+
+	if (!buf || !size || !cxt->cprz)
+		return;
+
 	persistent_ram_write(cxt->cprz, buf, size);
+	wmb();
 }
+EXPORT_SYMBOL_GPL(ramoops_console_write_buf);
 
 static int ramoops_probe(struct platform_device *pdev)
 {

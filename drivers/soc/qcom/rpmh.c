@@ -25,6 +25,7 @@
 #include <linux/spinlock.h>
 #include <linux/types.h>
 #include <linux/wait.h>
+#include <linux/workqueue.h>
 
 #include <soc/qcom/rpmh.h>
 #include <soc/qcom/tcs.h>
@@ -92,6 +93,37 @@ struct rpmh_client {
 static struct rpmh_mbox mbox_ctrlr[RPMH_MAX_MBOXES];
 DEFINE_MUTEX(rpmh_mbox_mutex);
 bool rpmh_standalone;
+
+/* Inert unless bk.debug_panic_after=<seconds> is present on the cmdline. */
+static unsigned int rpmh_debug_panic_after;
+static atomic_t rpmh_debug_panic_armed = ATOMIC_INIT(0);
+
+static int __init rpmh_debug_panic_setup(char *str)
+{
+	return get_option(&str, &rpmh_debug_panic_after) ? 0 : -EINVAL;
+}
+early_param("bk.debug_panic_after", rpmh_debug_panic_setup);
+
+static void rpmh_debug_panic_workfn(struct work_struct *work)
+{
+	panic("bk debug boot timeout after %u seconds",
+	      rpmh_debug_panic_after);
+}
+static DECLARE_DELAYED_WORK(rpmh_debug_panic_work,
+			 rpmh_debug_panic_workfn);
+
+static void rpmh_arm_debug_panic(void)
+{
+	if (!rpmh_debug_panic_after ||
+	    atomic_cmpxchg(&rpmh_debug_panic_armed, 0, 1))
+		return;
+
+	pr_emerg("rpmh: arming debug boot panic in %u seconds\n",
+		 rpmh_debug_panic_after);
+	schedule_delayed_work(&rpmh_debug_panic_work,
+			      round_jiffies_relative(
+				      rpmh_debug_panic_after * HZ));
+}
 
 static struct rpmh_msg *get_msg_from_pool(struct rpmh_client *rc)
 {
@@ -1017,6 +1049,10 @@ static struct rpmh_mbox *get_mbox(struct platform_device *pdev,
 	rpmh->mbox_dn = spec.np;
 	INIT_LIST_HEAD(&rpmh->resources);
 	spin_lock_init(&rpmh->lock);
+	raw_spin_lock_init(&rpmh->cache_lock);
+	atomic_set(&rpmh->fast_req, 0);
+	rpmh->cache_count = 0;
+	rpmh_arm_debug_panic();
 
 found:
 	of_node_put(spec.np);

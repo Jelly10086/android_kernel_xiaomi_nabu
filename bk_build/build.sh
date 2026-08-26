@@ -9,11 +9,11 @@ else
 fi
 ARCH=${ARCH:-arm64}
 DEFCONFIG=${DEFCONFIG:-nabu_defconfig}
-OUT_DIR=${OUT_DIR:-/home/rinnrei/Project/uwuAP-temp/out/nabu-4.14.336-b2w3}
+OUT_DIR=${OUT_DIR:-/home/rinnrei/Project/uwuAP-temp/out/nabu-4.14.336-b3k1}
 JOBS=${JOBS:-4}
-CLANG_DIR=${CLANG_DIR:-/home/rinnrei/Project/uwuAP-temp/toolchains/aosp-clang-r547379}
-GCC64_DIR=${GCC64_DIR:-/home/rinnrei/Project/uwuAOSP/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9}
-GCC32_DIR=${GCC32_DIR:-/home/rinnrei/Project/uwuAOSP/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9}
+CLANG_DIR=${CLANG_DIR:-/home/rinnrei/Project/uwuAOSP/prebuilts/clang/host/linux-x86/clang-r547379}
+GCC64_DIR=${GCC64_DIR:-/home/rinnrei/Project/uwuAP-temp/toolchains/nabu/gcc64}
+GCC32_DIR=${GCC32_DIR:-/home/rinnrei/Project/uwuAP-temp/toolchains/nabu/gcc32}
 PAHOLE=${PAHOLE:-/home/rinnrei/Project/uwuAOSP/prebuilts/kernel-build-tools/linux-x86/bin/pahole}
 PAHOLE_FLAGS=${PAHOLE_FLAGS:-"--skip_encoding_btf_decl_tag --skip_encoding_btf_type_tag --skip_encoding_btf_enum64"}
 DISABLE_LTO_CACHE=${DISABLE_LTO_CACHE:-1}
@@ -48,9 +48,19 @@ if [ -n "$CCACHE" ]; then
   }
   CC="$CCACHE $CC"
 fi
-[ -d "$GCC64_DIR/bin" ] || { echo "64-bit GNU binutils not found: $GCC64_DIR/bin" >&2; exit 2; }
-[ -d "$GCC32_DIR/bin" ] || { echo "32-bit GNU binutils not found: $GCC32_DIR/bin" >&2; exit 2; }
-PATH="$CLANG_DIR/bin:$GCC64_DIR/bin:$GCC32_DIR/bin:$PATH"
+PATH="$CLANG_DIR/bin:$PATH"
+if [ -n "$GCC64_DIR" ]; then
+  [ -d "$GCC64_DIR/bin" ] || {
+    echo "64-bit GNU binutils not found: $GCC64_DIR/bin" >&2; exit 2;
+  }
+  PATH="$GCC64_DIR/bin:$PATH"
+fi
+if [ -n "$GCC32_DIR" ]; then
+  [ -d "$GCC32_DIR/bin" ] || {
+    echo "32-bit GNU binutils not found: $GCC32_DIR/bin" >&2; exit 2;
+  }
+  PATH="$GCC32_DIR/bin:$PATH"
+fi
 export PATH
 
 make_kernel()
@@ -92,7 +102,9 @@ for symbol in MACH_XIAOMI_NABU BPF BPF_SYSCALL BPF_JIT BPF_JIT_ALWAYS_ON \
   CGROUP_BPF CGROUP_DEVICE CGROUP_PIDS CGROUP_NET_PRIO CPUSETS PSI \
   BLK_CGROUP CGROUP_WRITEBACK FAIR_GROUP_SCHED \
   SYSCTL SYSVIPC POSIX_MQUEUE NAMESPACES UTS_NS IPC_NS USER_NS PID_NS NET_NS \
-  SECCOMP SECCOMP_FILTER DEVTMPFS OVERLAY_FS TMPFS_POSIX_ACL TMPFS_XATTR \
+  SECCOMP SECCOMP_FILTER DEVTMPFS INITRAMFS_IGNORE_SKIP_FLAG UNICODE \
+  INET IPV6 SOCK_CGROUP_DATA NET_CLS_BPF NET_CLS_ACT \
+  OVERLAY_FS TMPFS_POSIX_ACL TMPFS_XATTR \
   FW_LOADER FW_LOADER_USER_HELPER VETH BRIDGE BRIDGE_NETFILTER \
   NETFILTER NETFILTER_ADVANCED NF_CONNTRACK NF_CONNTRACK_PROCFS \
   NF_CT_NETLINK NF_NAT \
@@ -102,21 +114,31 @@ for symbol in MACH_XIAOMI_NABU BPF BPF_SYSCALL BPF_JIT BPF_JIT_ALWAYS_ON \
   PREEMPT__LL PREEMPT CPU_FREQ_GOV_SCHEDUTIL \
   CC_OPTIMIZE_FOR_SIZE DEBUG_INFO \
   LRU_GEN ZRAM ZRAM_WRITEBACK \
-  DEBUG_INFO_DWARF4 DEBUG_INFO_BTF DEBUG_FS KALLSYMS FRAME_POINTER \
+  DEBUG_INFO_DWARF4 DEBUG_INFO_BTF DEBUG_FS DEBUG_KERNEL DYNAMIC_DEBUG \
+  KALLSYMS KALLSYMS_ALL FRAME_POINTER \
   PRINTK_TIME PSTORE \
-  PSTORE_ZLIB_COMPRESS PSTORE_CONSOLE PSTORE_PMSG PSTORE_RAM MAGIC_SYSRQ \
-  PANIC_ON_OOPS KSU KSU_MANUAL_HOOK; do
+  PSTORE_ZLIB_COMPRESS PSTORE_CONSOLE PSTORE_PMSG PSTORE_RAM PSTORE_FTRACE \
+  MAGIC_SYSRQ SCHEDSTATS LOCKUP_DETECTOR SOFTLOCKUP_DETECTOR \
+  DETECT_HUNG_TASK DEBUG_OBJECTS DEBUG_VM \
+  DEBUG_VIRTUAL DEBUG_MEMORY_INIT DEBUG_PER_CPU_MAPS \
+  DEBUG_SPINLOCK DEBUG_MUTEXES DEBUG_ATOMIC_SLEEP DEBUG_LIST DEBUG_NOTIFIERS \
+  FUNCTION_TRACER FUNCTION_GRAPH_TRACER IRQSOFF_TRACER PREEMPT_TRACER \
+  SCHED_TRACER FTRACE_SYSCALLS STACK_TRACER \
+  KSU KSU_MANUAL_HOOK; do
   grep -qx "CONFIG_$symbol=y" "$OUT_DIR/.config" || {
     echo "required config is not enabled: CONFIG_$symbol" >&2; exit 1;
   }
 done
-for symbol in DEBUG_INFO_REDUCED DEBUG_INFO_SPLIT DEBUG_KERNEL DYNAMIC_DEBUG \
-  KALLSYMS_ALL CC_OPTIMIZE_FOR_PERFORMANCE SCHED_WALT IRQ_TIME_ACCOUNTING \
+for symbol in DEBUG_INFO_REDUCED DEBUG_INFO_SPLIT \
+  CC_OPTIMIZE_FOR_PERFORMANCE SCHED_WALT IRQ_TIME_ACCOUNTING \
   PREEMPT_RT_FULL PREEMPT_RTB PREEMPT_RT_BASE RCU_BOOST; do
   if grep -q "^CONFIG_$symbol=" "$OUT_DIR/.config"; then
     echo "required config is not disabled: CONFIG_$symbol" >&2; exit 1
   fi
 done
+grep -q '^# CONFIG_PANIC_ON_OOPS is not set$' "$OUT_DIR/.config" || {
+  echo "required config is not disabled: CONFIG_PANIC_ON_OOPS" >&2; exit 1;
+}
 grep -qx '# CONFIG_LRU_GEN_ENABLED is not set' "$OUT_DIR/.config" || {
   echo "required config is not disabled: CONFIG_LRU_GEN_ENABLED" >&2; exit 1;
 }
@@ -207,7 +229,7 @@ arm64_image_size=$(od -An -tu8 -j16 -N8 "$BOOT/Image" | tr -d ' \n')
   echo "arm64 Image exceeds nabu 64 MiB boot window: $arm64_image_size bytes" >&2
   exit 1
 }
-for name in sm8150 sm8150p sm8150p-v2 sm8150-v2; do
+for name in sm8150-v2 sm8150 sm8150p-v2 sm8150p; do
   [ -f "$DTB_ROOT/$name.dtb" ] || { echo "missing $name.dtb" >&2; exit 1; }
   dtb_magic=$(dd if="$DTB_ROOT/$name.dtb" bs=1 count=4 2>/dev/null | \
     od -An -tx1 | tr -d ' \n')
@@ -223,9 +245,10 @@ for panel in dsi_k81_42_02_0a_dual_cphy_vid_display \
     echo "missing Pad 5 Pro panel in nabu overlay: $panel" >&2; exit 1;
   }
 done
-# Match the HyperOS vendor_boot DTB order.
-cat "$DTB_ROOT/sm8150.dtb" "$DTB_ROOT/sm8150p.dtb" \
-  "$DTB_ROOT/sm8150p-v2.dtb" "$DTB_ROOT/sm8150-v2.dtb" > "$OUT_DIR/artifacts/dtb"
+# Match the AOSP nabu vendor_boot DTB order:
+# sm8150-v2-xiaomi, sm8150-xiaomi, sm8150p-v2-xiaomi, sm8150p-xiaomi.
+cat "$DTB_ROOT/sm8150-v2.dtb" "$DTB_ROOT/sm8150.dtb" \
+  "$DTB_ROOT/sm8150p-v2.dtb" "$DTB_ROOT/sm8150p.dtb" > "$OUT_DIR/artifacts/dtb"
 cp "$BOOT/dtbo.img" "$OUT_DIR/artifacts/dtbo.img"
 python3 "$KERNEL_DIR/scripts/dtc/libfdt/mkdtboimg.py" \
   dump "$OUT_DIR/artifacts/dtbo.img" > "$OUT_DIR/artifacts/dtbo-dump.txt"
@@ -243,7 +266,7 @@ grep -Eq '(^|[[:space:]])pid[[:space:]]*;' \
   echo "BTF task_struct::pid is missing" >&2; exit 1;
 }
 kernel_release=$(make_kernel -s kernelrelease)
-[ "$kernel_release" = "4.14.336_bk-Kernel_17.0-b2w3" ] || {
+[ "$kernel_release" = "4.14.336_bk-Kernel_17.0-b3k1" ] || {
   echo "unexpected kernel release: $kernel_release" >&2; exit 1;
 }
 

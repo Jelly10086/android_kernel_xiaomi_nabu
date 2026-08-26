@@ -1907,10 +1907,24 @@ static int check_func_arg(struct bpf_verifier_env *env, u32 regno,
 		/* A full socket is also a valid sock_common pointer. */
 		if (!type_is_sk_pointer(type))
 			goto err_type;
+		if (reg->id) {
+			if (meta->ptr_id) {
+				verbose("verifier reference mismatch for R%d: meta=%d reg=%d\n",
+					regno, meta->ptr_id, reg->id);
+				return -EFAULT;
+			}
+			meta->ptr_id = reg->id;
+		}
 	} else if (arg_type == ARG_PTR_TO_SOCKET) {
 		expected_type = PTR_TO_SOCKET;
 		if (type != expected_type)
 			goto err_type;
+		if (meta->ptr_id || !reg->id) {
+			verbose("verifier reference mismatch for R%d: meta=%d reg=%d\n",
+				regno, meta->ptr_id, reg->id);
+			return -EFAULT;
+		}
+		meta->ptr_id = reg->id;
 	} else if (arg_type == ARG_PTR_TO_CONST_STR) {
 		struct bpf_map *map = reg->map_ptr;
 		u64 map_addr;
@@ -2251,13 +2265,27 @@ static void clear_all_pkt_pointers(struct bpf_verifier_env *env)
 
 static bool is_release_function(enum bpf_func_id func_id)
 {
-	return func_id == BPF_FUNC_ringbuf_submit ||
+	return func_id == BPF_FUNC_sk_release ||
+	       func_id == BPF_FUNC_ringbuf_submit ||
 	       func_id == BPF_FUNC_ringbuf_discard;
 }
 
 static bool is_acquire_function(enum bpf_func_id func_id)
 {
-	return func_id == BPF_FUNC_ringbuf_reserve;
+	return func_id == BPF_FUNC_sk_lookup_tcp ||
+	       func_id == BPF_FUNC_sk_lookup_udp ||
+	       func_id == BPF_FUNC_ringbuf_reserve;
+}
+
+static bool reference_state_exists(const struct bpf_verifier_state *state,
+				   int id)
+{
+	int i;
+
+	for (i = 0; i < state->acquired_refs; i++)
+		if (state->refs[i].id == id)
+			return true;
+	return false;
 }
 
 static void release_reg_references(struct bpf_verifier_state *state, int id)
@@ -2267,7 +2295,9 @@ static void release_reg_references(struct bpf_verifier_state *state, int id)
 
 	for (i = 0; i < MAX_BPF_REG; i++)
 		if ((regs[i].type == PTR_TO_MEM ||
-		     regs[i].type == PTR_TO_MEM_OR_NULL) &&
+		     regs[i].type == PTR_TO_MEM_OR_NULL ||
+		     regs[i].type == PTR_TO_SOCKET ||
+		     regs[i].type == PTR_TO_SOCKET_OR_NULL) &&
 		    regs[i].id == id)
 			mark_reg_unknown(regs, i);
 
@@ -2276,7 +2306,9 @@ static void release_reg_references(struct bpf_verifier_state *state, int id)
 			continue;
 		reg = &state->stack[i].spilled_ptr;
 		if ((reg->type == PTR_TO_MEM ||
-		     reg->type == PTR_TO_MEM_OR_NULL) && reg->id == id)
+		     reg->type == PTR_TO_MEM_OR_NULL ||
+		     reg->type == PTR_TO_SOCKET ||
+		     reg->type == PTR_TO_SOCKET_OR_NULL) && reg->id == id)
 			__mark_reg_unknown(reg);
 	}
 }
@@ -2477,9 +2509,20 @@ static int check_call(struct bpf_verifier_env *env, int func_id, int insn_idx)
 		else if (insn_aux->map_ptr != meta.map_ptr)
 			insn_aux->map_ptr = BPF_MAP_PTR_POISON;
 	} else if (fn->ret_type == RET_PTR_TO_SOCKET_OR_NULL) {
+		int id;
+
+		if (is_acquire_function(func_id)) {
+			id = acquire_reference_state(env, insn_idx);
+			if (id < 0)
+				return id;
+		} else if (func_id == BPF_FUNC_sk_fullsock && meta.ptr_id) {
+			id = meta.ptr_id;
+		} else {
+			id = ++env->id_gen;
+		}
 		mark_reg_known_zero(regs, BPF_REG_0);
 		regs[BPF_REG_0].type = PTR_TO_SOCKET_OR_NULL;
-		regs[BPF_REG_0].id = ++env->id_gen;
+		regs[BPF_REG_0].id = id;
 	} else if (fn->ret_type == RET_PTR_TO_ALLOC_MEM_OR_NULL) {
 		int id;
 
@@ -4005,7 +4048,8 @@ static void mark_map_reg(struct bpf_reg_state *reg, u32 id, bool is_null)
 		} else if (reg->type == PTR_TO_MEM_OR_NULL) {
 			reg->type = PTR_TO_MEM;
 		}
-		if (is_null || reg->type != PTR_TO_MEM)
+		if (is_null || (reg->type != PTR_TO_MEM &&
+				reg->type != PTR_TO_SOCKET))
 			reg->id = 0;
 	}
 }
@@ -4020,7 +4064,9 @@ static void mark_map_regs(struct bpf_verifier_state *state, u32 regno,
 	u32 id = regs[regno].id;
 	int i;
 
-	if (regs[regno].type == PTR_TO_MEM_OR_NULL && is_null)
+	if ((regs[regno].type == PTR_TO_MEM_OR_NULL ||
+	     regs[regno].type == PTR_TO_SOCKET_OR_NULL) && is_null &&
+	    reference_state_exists(state, id))
 		WARN_ON_ONCE(release_reference_state(state, id));
 
 	for (i = 0; i < MAX_BPF_REG; i++)
@@ -4520,7 +4566,8 @@ peek_stack:
 			else if (ret < 0)
 				goto err_free;
 
-			ret = push_insn(t, t + insns[t].off + 1, BRANCH, env);
+			ret = push_insn(t, t + insns[t].off + 1, BRANCH,
+					env);
 			if (ret == 1)
 				goto peek_stack;
 			else if (ret < 0)

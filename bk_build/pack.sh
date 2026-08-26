@@ -7,14 +7,13 @@ if [ -n "${KERNEL_DIR:-}" ]; then
 else
   KERNEL_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 fi
-OUT_DIR=${OUT_DIR:-/home/rinnrei/Project/uwuAP-temp/out/nabu-4.14.336-b2w3}
+OUT_DIR=${OUT_DIR:-/home/rinnrei/Project/uwuAP-temp/out/nabu-4.14.336-b3k1}
 ARTIFACTS=${ARTIFACTS:-$OUT_DIR/artifacts}
 PACKAGE_ROOT=${PACKAGE_ROOT:-$OUT_DIR/packages}
 TEMPLATE=$SCRIPT_DIR/anykernel.sh
 ANYKERNEL_DIR=$SCRIPT_DIR/anykernel
 ANYKERNEL_TOOLS=$ANYKERNEL_DIR/tools
 ANYKERNEL_META_INF=$ANYKERNEL_DIR/META-INF
-RECOVERY_DIR=$SCRIPT_DIR/recovery
 MODULE_DIR=$SCRIPT_DIR/modules/bk-control
 
 [ -f "$ARTIFACTS/Image.gz" ] || { echo "run build.sh first: Image.gz missing" >&2; exit 2; }
@@ -41,13 +40,6 @@ for webui_resource in \
     echo "bk-control WebUI resource missing: $webui_resource" >&2; exit 2;
   }
 done
-[ -f "$RECOVERY_DIR/ramdisk-recovery.cpio.gz" ] || {
-  echo "embedded PBRP ramdisk missing: $RECOVERY_DIR/ramdisk-recovery.cpio.gz" >&2; exit 2;
-}
-[ "$(sha256sum "$RECOVERY_DIR/ramdisk-recovery.cpio.gz" | awk '{print $1}')" = \
-  "248feef8879116c86df1729ecf9595b4be50834dd5bd66fe5732953cafaa4602" ] || {
-  echo "embedded PBRP ramdisk checksum mismatch" >&2; exit 2;
-}
 [ -f "$ANYKERNEL_META_INF/com/google/android/update-binary" ] || {
   echo "AnyKernel3 update-binary missing under $ANYKERNEL_META_INF" >&2; exit 2;
 }
@@ -77,7 +69,7 @@ case "$KERNEL_SUFFIX" in
 esac
 
 stamp=$(date -u +%H%M%S)
-PACKAGE="$PACKAGE_ROOT/bk-Kernel_nabu-A17-Hyper-$KERNEL_SUFFIX-$stamp"
+PACKAGE="$PACKAGE_ROOT/bk-Kernel_nabu-A17-AP-$KERNEL_SUFFIX-$stamp"
 ZIP_PATH="$PACKAGE.zip"
 [ ! -e "$PACKAGE" ] && [ ! -e "$ZIP_PATH" ] || { echo "package already exists: $PACKAGE" >&2; exit 1; }
 mkdir -p "$PACKAGE"
@@ -86,7 +78,7 @@ cp "$ARTIFACTS/dtb" "$PACKAGE/dtb"
 cp "$ARTIFACTS/dtbo.img" "$PACKAGE/dtbo.img"
 cp "$TEMPLATE" "$PACKAGE/anykernel.sh"
 chmod 0755 "$PACKAGE/anykernel.sh"
-mkdir -p "$PACKAGE/tools" "$PACKAGE/recovery" "$PACKAGE/module"
+mkdir -p "$PACKAGE/tools" "$PACKAGE/module"
 for tool in ak3-core.sh busybox magiskboot; do
   cp "$ANYKERNEL_TOOLS/$tool" "$PACKAGE/tools/$tool"
 done
@@ -104,8 +96,6 @@ chmod 0755 "$PACKAGE/module/bkctl" "$PACKAGE/module/service.sh" \
   "$PACKAGE/module/bin/bk-zram-setup" \
   "$PACKAGE/module/bin/bk-keyboard-monitor"
 cp -a "$ANYKERNEL_META_INF" "$PACKAGE/META-INF"
-cp "$RECOVERY_DIR/ramdisk-recovery.cpio.gz" \
-  "$PACKAGE/recovery/ramdisk-recovery.cpio.gz"
 (cd "$PACKAGE" && zip -qr9 "$ZIP_PATH" .)
 unzip -t "$ZIP_PATH" >/dev/null
 for entry in Image.gz dtb dtbo.img anykernel.sh tools/ak3-core.sh \
@@ -117,7 +107,6 @@ for entry in Image.gz dtb dtbo.img anykernel.sh tools/ak3-core.sh \
   module/bin/bk-zram-setup \
   module/bin/bk-keyboard-monitor \
   module/bin/bkk-log-exporter.apk \
-  recovery/ramdisk-recovery.cpio.gz \
   META-INF/com/google/android/update-binary \
   META-INF/com/google/android/updater-script; do
   unzip -Z1 "$ZIP_PATH" | grep -Fx "$entry" >/dev/null || {
@@ -129,7 +118,6 @@ expected_base=$(printf '%s\n' \
   Image.gz anykernel.sh dtb dtbo.img \
   META-INF/com/google/android/update-binary \
   META-INF/com/google/android/updater-script \
-  recovery/ramdisk-recovery.cpio.gz \
   tools/ak3-core.sh tools/busybox tools/magiskboot)
 expected_module=$(cd "$PACKAGE" && find module -type f -print)
 expected_files=$(printf '%s\n%s\n' "$expected_base" "$expected_module" | LC_ALL=C sort)
@@ -145,10 +133,6 @@ expected_kernel_string="kernel.string=RinnRei's bk-Kernel / CoolApk @零音Rei"
 unzip -p "$ZIP_PATH" anykernel.sh | \
   grep -Fx "$expected_kernel_string" >/dev/null || {
     echo "AnyKernel kernel.string is incorrect" >&2; exit 1;
-  }
-unzip -p "$ZIP_PATH" anykernel.sh | \
-  grep -F 'patch_prop "$ramdisk/prop.default" ro.mi.os.custfeatureresolve true;' >/dev/null || {
-    echo "HyperOS cust feature service property fix is missing" >&2; exit 1;
   }
 unzip -p "$ZIP_PATH" anykernel.sh | \
   grep -Fx 'module_target=/data/adb/modules/bk-control;' >/dev/null || {
@@ -176,14 +160,6 @@ keyboard_elf_magic=$(unzip -p "$ZIP_PATH" module/bin/bk-keyboard-monitor | \
 [ "$keyboard_elf_magic" = "7f454c46" ] || {
   echo "keyboard monitor is not ELF" >&2; exit 1;
 }
-[ "$(unzip -p "$ZIP_PATH" recovery/ramdisk-recovery.cpio.gz | sha256sum | awk '{print $1}')" = \
-  "248feef8879116c86df1729ecf9595b4be50834dd5bd66fe5732953cafaa4602" ] || {
-  echo "packaged PBRP ramdisk checksum mismatch" >&2; exit 1;
-}
-unzip -p "$ZIP_PATH" anykernel.sh | \
-  grep -F 'pbrp_sha256=15ae763c1f5b93ae48bcd007ff1f66871873aaee5b3a32852acbbf75b897fc54;' >/dev/null || {
-    echo "PBRP installer checksum is missing" >&2; exit 1;
-  }
 unzip -p "$ZIP_PATH" module/scripts/bk-reburnout.sh | \
   grep -F 'reb_config_get swappiness 180' >/dev/null || {
     echo "swappiness 180 policy is missing" >&2; exit 1;
@@ -274,14 +250,15 @@ fi
 unzip -p "$ZIP_PATH" anykernel.sh | grep -Fx 'block=boot;' >/dev/null || {
   echo "boot handling is missing" >&2; exit 1;
 }
-unzip -p "$ZIP_PATH" anykernel.sh | \
-  grep -F 'patch_cmdline androidboot.force_normal_boot ""' >/dev/null || {
-    echo "force_normal_boot removal is missing" >&2; exit 1;
-  }
-unzip -p "$ZIP_PATH" anykernel.sh | \
-  grep -F 'PBRP fastboot boot image detected.' >/dev/null || {
-  echo "PBRP boot-image guard is missing" >&2; exit 1;
-}
+if unzip -Z1 "$ZIP_PATH" | grep -E '(^|/)recovery/' >/dev/null; then
+  echo "package must not contain a recovery ramdisk" >&2
+  exit 1
+fi
+if unzip -p "$ZIP_PATH" anykernel.sh | \
+  grep -E 'PBRP|pbrp_|ramdisk-recovery|patch_cmdline androidboot\.force_normal_boot' >/dev/null; then
+  echo "AnyKernel must preserve the installed boot ramdisk" >&2
+  exit 1
+fi
 unzip -p "$ZIP_PATH" anykernel.sh | \
   grep -Fx '  ui_print "Bootmode install: updating bkk-control only; boot is unchanged.";' >/dev/null || {
   echo "bootmode boot-image guard is missing" >&2; exit 1;

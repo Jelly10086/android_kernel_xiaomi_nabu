@@ -20,39 +20,11 @@ fi
 if [ "$BOOTMODE" = true ]; then
   ui_print "Bootmode install: updating bkk-control only; boot is unchanged.";
 else
-  if { [ -f "$split_img/cmdline.txt" ] && \
-       grep -Eq '(^|[[:space:]])twrpfastboot=1([[:space:]]|$)' "$split_img/cmdline.txt"; } || \
-     { [ -f "$split_img/header" ] && \
-       grep -Eq '^cmdline=.*(^|[[:space:]])twrpfastboot=1([[:space:]]|$)' "$split_img/header"; }; then
-    abort "PBRP fastboot boot image detected." \
-          "Restore the matching system boot image, then flash this package without rebooting recovery.";
-  fi
-
-  pbrp_source="$home/recovery/ramdisk-recovery.cpio.gz";
-  pbrp_cpio="$home/ramdisk-recovery.cpio";
-  pbrp_sha256=15ae763c1f5b93ae48bcd007ff1f66871873aaee5b3a32852acbbf75b897fc54;
-  [ -f "$pbrp_source" ] || abort "Missing embedded PBRP recovery ramdisk.";
-  "$bin/magiskboot" decompress "$pbrp_source" "$pbrp_cpio" || \
-    abort "Cannot decompress embedded PBRP recovery ramdisk.";
-  [ "$(sha256sum "$pbrp_cpio" | awk '{ print $1 }')" = "$pbrp_sha256" ] || \
-    abort "Embedded PBRP recovery ramdisk checksum mismatch.";
-  [ "$ramdisk" = "$home/ramdisk" ] || abort "Unexpected AnyKernel ramdisk path.";
-  rm -rf "$ramdisk";
-  mkdir -p "$ramdisk" || abort "Cannot create PBRP ramdisk directory.";
-  cd "$ramdisk";
-  EXTRACT_UNSAFE_SYMLINKS=1 cpio -d -F "$pbrp_cpio" -i || \
-    abort "Cannot extract embedded PBRP recovery ramdisk.";
-  cd "$home";
-  [ -f "$ramdisk/init" ] && [ -f "$ramdisk/prop.default" ] && \
-    [ -f "$ramdisk/twres/ui.xml" ] || abort "Embedded PBRP ramdisk is incomplete.";
-
-  # Keep recovery selection under the bootloader's force_normal_boot property.
-  patch_cmdline androidboot.force_normal_boot ""
-  if [ -f "$ramdisk/prop.default" ]; then
-    patch_prop "$ramdisk/prop.default" ro.mi.os.custfeatureresolve true;
-  else
-    abort "Missing boot ramdisk prop.default; refusing an incomplete HyperOS fix.";
-  fi
+  ui_print "Preserving the installed boot ramdisk.";
+  # Keep recoverable Oops/WARN paths even if an older vendor_boot carried
+  # debugging panic overrides in its command line.
+  patch_cmdline oops=panic ""
+  patch_cmdline panic_on_warn=1 ""
 fi
 
 module_source="$home/module";
@@ -104,5 +76,7 @@ if [ "$BOOTMODE" != true ]; then
   patch_vbmeta_flag=auto;
   reset_ak;
   dump_boot;
+  patch_cmdline oops=panic ""
+  patch_cmdline panic_on_warn=1 ""
   write_boot;
 fi

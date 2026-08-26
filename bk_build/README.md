@@ -15,7 +15,7 @@ match the maintainer workstation. `nabu-perf_defconfig` is not a supported
 default because it does not select `CONFIG_MACH_XIAOMI_NABU`.
 
 Package names include the kernel release suffix:
-`bk-Kernel_nabu-A17-AP-b3k1-HHMMSS.zip`. The ZIP contains only
+`bk-Kernel_nabu-17.0-AP-b3k1-HHMMSS.zip`. The ZIP contains only
 files consumed by the installer. Build metadata stays under `artifacts/`; CI
 generates the GitHub Release description after the build succeeds.
 

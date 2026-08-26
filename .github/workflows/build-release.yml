@@ -124,7 +124,7 @@ jobs:
         run: |
           set -euo pipefail
           package=$(find "$OUT_DIR/packages" -maxdepth 1 -type f \
-            -name 'bk-Kernel_nabu-A17-AP-b3k1-*.zip' -print -quit)
+            -name 'bk-Kernel_nabu-17.0-AP-b3k1-*.zip' -print -quit)
           test -n "$package"
           test -f "$package.sha256"
           unzip -t "$package" >/dev/null
@@ -137,7 +137,7 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: bk-Kernel_nabu-A17-AP-b3k1
+          name: bk-Kernel_nabu-17.0-AP-b3k1
           path: |
             ${{ steps.package.outputs.package }}
             ${{ steps.package.outputs.checksum }}

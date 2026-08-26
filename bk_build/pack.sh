@@ -69,7 +69,7 @@ case "$KERNEL_SUFFIX" in
 esac
 
 stamp=$(date -u +%H%M%S)
-PACKAGE="$PACKAGE_ROOT/bk-Kernel_nabu-A17-AP-$KERNEL_SUFFIX-$stamp"
+PACKAGE="$PACKAGE_ROOT/bk-Kernel_nabu-17.0-AP-$KERNEL_SUFFIX-$stamp"
 ZIP_PATH="$PACKAGE.zip"
 [ ! -e "$PACKAGE" ] && [ ! -e "$ZIP_PATH" ] || { echo "package already exists: $PACKAGE" >&2; exit 1; }
 mkdir -p "$PACKAGE"

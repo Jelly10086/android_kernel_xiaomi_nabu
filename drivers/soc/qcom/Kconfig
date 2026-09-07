@@ -1,3 +1,13 @@
+
+config BK_OOPS_FLASH
+	bool "bk: dump last printk tail to the oops flash partition"
+	depends on BLOCK
+	help
+	  Persist the last 512 KiB of the kernel printk buffer to the
+	  dedicated "oops" flash partition on panic, oops, emergency restart
+	  and restart, so the final kernel log survives a full power loss
+	  that would also wipe RAM-backed pstore/ramoops.
+
 #
 # QCOM Soc drivers
 #

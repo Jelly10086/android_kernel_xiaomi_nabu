@@ -696,9 +696,13 @@
 			label = "cont_splash_region";
 		};
 
-		ramoops: ramoops@a1600000 {
+		ramoops: ramoops@b0000000 {
 			compatible = "ramoops";
-			reg = <0x0 0xa1600000 0x0 0x800000>;
+			/* Xiaomi reserves 0xB0000000 for pstore on nabu via the
+			 * ramoops_memreserve=4M early param in their stock kernel
+			 * (fs/pstore/ram.c, mem_address is hard-coded there); mirror
+			 * that location so the region is bootloader-safe by design. */
+			reg = <0x0 0xb0000000 0x0 0x800000>;
 			record-size = <0x200000>;
 			console-size = <0x200000>;
 			pmsg-size = <0x200000>;

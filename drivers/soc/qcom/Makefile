@@ -1,3 +1,4 @@
+obj-$(CONFIG_BK_OOPS_FLASH) += bk_oops_flash.o
 # SPDX-License-Identifier: GPL-2.0
 KASAN_SANITIZE_scm.o := n
 obj-$(CONFIG_QCOM_CPUSS_DUMP) += cpuss_dump.o

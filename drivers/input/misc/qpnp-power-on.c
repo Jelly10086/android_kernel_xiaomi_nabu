@@ -34,6 +34,8 @@
 #include <linux/regulator/of_regulator.h>
 #include <linux/qpnp/qpnp-pbs.h>
 #include <linux/qpnp/qpnp-misc.h>
+#include <linux/reboot.h>
+#include <linux/workqueue.h>
 
 #define PMIC_VER_8941				0x01
 #define PMIC_VERSION_REG			0x0105
@@ -243,12 +245,24 @@ struct qpnp_pon {
 	ktime_t			kpdpwr_last_release_time;
 	struct notifier_block	pon_nb;
 	bool			legacy_hard_reset_offset;
+	ktime_t			bk_last_press;
+	struct delayed_work	bk_hold_work;
 };
 
 static int pon_ship_mode_en;
 module_param_named(
 	ship_mode_en, pon_ship_mode_en, int, 0600
 );
+
+/* bk: power-key triggered restart aids for debugging stuck boots.
+ * double press  = forced panic (ramoops + oops-flash snapshot, auto reboot)
+ * long press    = graceful kernel_restart before the PMIC hard reset */
+static unsigned int bk_hold_ms = 6000;
+module_param(bk_hold_ms, uint, 0644);
+MODULE_PARM_DESC(bk_hold_ms, "ms of power-key hold before graceful restart (0 = off)");
+static unsigned int bk_dbl_ms = 500;
+module_param(bk_dbl_ms, uint, 0644);
+MODULE_PARM_DESC(bk_dbl_ms, "double-press window in ms for forced panic (0 = off)");
 
 static struct qpnp_pon *sys_reset_dev;
 static DEFINE_SPINLOCK(spon_list_slock);
@@ -943,6 +957,27 @@ static int qpnp_pon_store_and_clear_warm_reset(struct qpnp_pon *pon)
 	return 0;
 }
 
+/* bk: fires when the power key has been held for bk_hold_ms; the kernel
+ * is alive but userspace may be long gone (boot logo stuck). */
+static void qpnp_pon_bk_hold_work(struct work_struct *work)
+{
+	struct qpnp_pon *pon = container_of(to_delayed_work(work),
+					    struct qpnp_pon, bk_hold_work);
+	unsigned int sts = 0;
+
+	if (bk_hold_ms == 0)
+		return;
+
+	if (qpnp_pon_read(pon, QPNP_PON_RT_STS(pon), &sts))
+		return;
+	if (!(sts & QPNP_PON_KPDPWR_N_SET))
+		return;	/* released in the meantime */
+
+	pr_emerg("qpnp-power-on: bk power key held %ums, graceful restart\n",
+		 bk_hold_ms);
+	kernel_restart("powerkey");
+}
+
 static int qpnp_pon_input_dispatch(struct qpnp_pon *pon, u32 pon_type)
 {
 	struct qpnp_pon_config *cfg = NULL;
@@ -1013,6 +1048,30 @@ static int qpnp_pon_input_dispatch(struct qpnp_pon *pon, u32 pon_type)
 	input_sync(pon->pon_input);
 
 	cfg->old_state = !!key_status;
+
+	/* bk: double-press forced panic / hold-to-restart tracking */
+	if (pon_type == PON_KPDPWR) {
+		ktime_t now = ktime_get();
+
+		if (key_status) {
+			if (bk_dbl_ms && pon->bk_last_press &&
+			    ktime_sub(now, pon->bk_last_press) <=
+			    (s64)bk_dbl_ms * 1000000ll) {
+				cancel_delayed_work(&pon->bk_hold_work);
+				pr_emerg("qpnp-power-on: bk double press, forced panic\n");
+				if (panic_timeout <= 0)
+					panic_timeout = 10;
+				panic("powerkey2: double-press forced panic");
+			}
+			pon->bk_last_press = now;
+
+			if (bk_hold_ms)
+				schedule_delayed_work(&pon->bk_hold_work,
+					msecs_to_jiffies(bk_hold_ms));
+		} else {
+			cancel_delayed_work(&pon->bk_hold_work);
+		}
+	}
 
 	return 0;
 }
@@ -1287,6 +1346,9 @@ qpnp_pon_request_irqs(struct qpnp_pon *pon, struct qpnp_pon_config *cfg)
 
 	switch (cfg->pon_type) {
 	case PON_KPDPWR:
+		INIT_DELAYED_WORK(&pon->bk_hold_work, qpnp_pon_bk_hold_work);
+		pr_info("qpnp-power-on: bk restart aid enabled (dbl=%ums hold=%ums)\n",
+			bk_dbl_ms, bk_hold_ms);
 		rc = devm_request_irq(pon->dev, cfg->state_irq, qpnp_kpdpwr_irq,
 				IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
 				"pon_kpdpwr_status", pon);
@@ -2472,6 +2534,7 @@ static int qpnp_pon_remove(struct platform_device *pdev)
 
 	device_remove_file(&pdev->dev, &dev_attr_debounce_us);
 
+	cancel_delayed_work_sync(&pon->bk_hold_work);
 	cancel_delayed_work_sync(&pon->bark_work);
 
 	qpnp_pon_debugfs_remove(pon);
